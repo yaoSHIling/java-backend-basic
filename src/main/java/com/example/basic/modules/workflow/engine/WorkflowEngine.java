@@ -1,15 +1,12 @@
 package com.example.basic.modules.workflow.engine;
 
-import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.example.basic.modules.workflow.dao.WfInstanceDao;
 import com.example.basic.modules.workflow.dao.WfInstanceLogDao;
 import com.example.basic.modules.workflow.engine.WfGraph.*;
 import com.example.basic.modules.workflow.engine.WfNodeResult;
 import com.example.basic.modules.workflow.entity.WfInstance;
 import com.example.basic.modules.workflow.entity.WfInstanceLog;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
@@ -38,7 +35,6 @@ import java.util.*;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class WorkflowEngine {
 
     private final Map<String, NodeExecutor> executorMap = new HashMap<>();
@@ -63,13 +59,25 @@ public class WorkflowEngine {
      * 启动工作流（同步执行，简单流程）
      */
     @Transactional
-    public Long startSync(WfGraph graph, Map<String, Object> inputData, Long initiatorId) {
+    public Long startSync(Long definitionId, String definitionCode, WfGraph graph,
+                          Map<String, Object> inputData, Long initiatorId) {
+        if (graph == null || graph.getNodes() == null || graph.getNodes().isEmpty()) {
+            throw new IllegalArgumentException("工作流图为空");
+        }
+        if (GraphUtil.findStartNode(graph) == null) {
+            throw new IllegalArgumentException("工作流缺少 start 节点");
+        }
+        if (GraphUtil.hasCycle(graph)) {
+            throw new IllegalArgumentException("工作流存在循环依赖，请检查连线");
+        }
+
         // 1. 创建实例
         WfInstance instance = new WfInstance();
-        instance.setDefinitionId(0L); // TODO: 关联 definition
-        instance.setGraphData(JSONUtil.toJson(graph));
+        instance.setDefinitionId(definitionId);
+        instance.setDefinitionCode(definitionCode);
+        instance.setGraphData(JSONUtil.toJsonStr(graph));
         instance.setStatus(WfInstance.STATUS_RUNNING);
-        instance.setInputData(JSONUtil.toJson(inputData));
+        instance.setInputData(JSONUtil.toJsonStr(inputData));
         instance.setInitiatorId(initiatorId);
         instance.setStartedAt(new Date());
         instanceDao.insert(instance);
@@ -79,7 +87,7 @@ public class WorkflowEngine {
         ctx.setGraph(graph);
         ctx.setInstanceId(instance.getId());
         ctx.setInitiatorId(initiatorId);
-        ctx.setVariables(new HashMap<>(inputData));
+        ctx.setVariables(inputData != null ? new HashMap<>(inputData) : new HashMap<>());
 
         // 3. 注入审批任务创建回调
         ctx.setApprovalTaskCallback((nodeId, nodeName, assigneeType, assigneeExpr, title, content) -> {
@@ -91,7 +99,7 @@ public class WorkflowEngine {
         try {
             executeGraph(instance, graph, ctx, inputData);
             instance.setStatus(WfInstance.STATUS_SUCCESS);
-            instance.setOutputData(JSONUtil.toJson(ctx.getFinalOutput()));
+            instance.setOutputData(JSONUtil.toJsonStr(ctx.getFinalOutput()));
         } catch (Exception e) {
             instance.setStatus(WfInstance.STATUS_FAILED);
             instance.setErrorMsg(e.getMessage());
@@ -131,7 +139,12 @@ public class WorkflowEngine {
             .findFirst()
             .orElseThrow(() -> new IllegalStateException("工作流缺少 start 节点"));
 
-        String currentNodeId = startNode.getId();
+        executeFromNode(instance, graph, ctx, inputData, startNode.getId());
+    }
+
+    private void executeFromNode(WfInstance instance, WfGraph graph, ExecutionContext ctx,
+                                 Map<String, Object> inputData, String startNodeId) throws Exception {
+        String currentNodeId = startNodeId;
         Map<String, Object> currentData = inputData != null ? new HashMap<>(inputData) : new HashMap<>();
 
         // 主循环：最多 1000 个节点，防止死循环
@@ -170,7 +183,7 @@ public class WorkflowEngine {
             log.setNodeName(node.getData() != null ? node.getData().getName() : node.getId());
             log.setNodeType(node.getType());
             log.setStatus(WfInstanceLog.STATUS_RUNNING);
-            log.setInputData(JSONUtil.toJson(currentData));
+            log.setInputData(JSONUtil.toJsonStr(currentData));
             log.setStartedAt(new Date());
             logDao.insert(log);
 
@@ -179,7 +192,7 @@ public class WorkflowEngine {
 
             long elapsed = System.currentTimeMillis() - startTime;
             log.setElapsedMs((int) elapsed);
-            log.setOutputData(JSONUtil.toJson(result.getOutputData()));
+            log.setOutputData(JSONUtil.toJsonStr(result.getOutputData()));
             log.setFinishedAt(new Date());
 
             if ("failure".equals(result.getStatus())) {
@@ -189,9 +202,6 @@ public class WorkflowEngine {
                 throw new RuntimeException("节点执行失败: " + result.getErrorMsg());
             }
 
-            log.setStatus(WfInstanceLog.STATUS_SUCCESS);
-            logDao.updateById(log);
-
             // 更新当前数据
             if (result.getOutputData() != null) {
                 currentData.putAll(result.getOutputData());
@@ -199,18 +209,25 @@ public class WorkflowEngine {
 
             // 特殊处理：end 节点
             if ("end".equals(node.getType())) {
+                log.setStatus(WfInstanceLog.STATUS_SUCCESS);
+                logDao.updateById(log);
                 ctx.setFinalOutput(currentData);
                 break;
             }
 
             // 特殊处理：审批节点（waiting 状态，暂停）
             if ("waiting".equals(result.getStatus())) {
+                log.setStatus(WfInstanceLog.STATUS_WAIT);
+                logDao.updateById(log);
                 instance.setStatus(WfInstance.STATUS_PAUSED);
                 instance.setCurrentNodeId(currentNodeId);
                 instanceDao.updateById(instance);
                 log.info("工作流暂停，等待审批回调 | instanceId={} | nodeId={}", instance.getId(), currentNodeId);
                 return; // 退出，等待回调
             }
+
+            log.setStatus(WfInstanceLog.STATUS_SUCCESS);
+            logDao.updateById(log);
 
             // 推进到下一个节点
             currentNodeId = result.getNextNodeId();
@@ -220,7 +237,7 @@ public class WorkflowEngine {
         }
 
         instance.setStatus(WfInstance.STATUS_SUCCESS);
-        instance.setFinalOutput(JSONUtil.toJson(ctx.getFinalOutput()));
+        instance.setOutputData(JSONUtil.toJsonStr(ctx.getFinalOutput()));
         instance.setFinishedAt(new Date());
         instanceDao.updateById(instance);
     }
@@ -233,17 +250,92 @@ public class WorkflowEngine {
         WfInstance instance = instanceDao.selectById(instanceId);
         if (instance == null) throw new IllegalArgumentException("实例不存在: " + instanceId);
 
-        WfGraph graph = JSONUtil.toJson(instance.getGraphData(), WfGraph.class);
+        WfGraph graph = JSONUtil.toBean(instance.getGraphData(), WfGraph.class);
         ExecutionContext ctx = new ExecutionContext();
         ctx.setGraph(graph);
         ctx.setInstanceId(instanceId);
         ctx.setInitiatorId(instance.getInitiatorId());
         ctx.setVariables(new HashMap<>());
 
-        // 审批通过/拒绝逻辑
-        // TODO: 记录审批意见到日志
+        String pausedNodeId = instance.getCurrentNodeId();
+        if (pausedNodeId == null || pausedNodeId.isBlank()) {
+            throw new IllegalStateException("当前实例不在审批暂停状态");
+        }
 
-        // 找到当前节点（审批节点），继续执行下一个节点
-        // ...
+        Map<String, Object> currentData = parseJsonMap(instance.getInputData());
+        WfInstanceLog pausedLog = logDao.selectOne(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<WfInstanceLog>()
+                .eq(WfInstanceLog::getInstanceId, instanceId)
+                .eq(WfInstanceLog::getNodeId, pausedNodeId)
+                .orderByDesc(WfInstanceLog::getId)
+                .last("limit 1")
+        );
+        if (pausedLog != null && pausedLog.getOutputData() != null && !pausedLog.getOutputData().isBlank()) {
+            currentData = parseJsonMap(pausedLog.getOutputData());
+        }
+
+        currentData.put("_approvalTaskId", taskId);
+        currentData.put("_approvalStatus", approved ? "approved" : "rejected");
+        currentData.put("_approvalApproved", approved);
+        currentData.put("_approvalOpinion", opinion);
+
+        String nextNodeId = resolveApprovalNextNode(graph, pausedNodeId, approved);
+        if (nextNodeId == null) {
+            instance.setStatus(approved ? WfInstance.STATUS_SUCCESS : WfInstance.STATUS_FAILED);
+            instance.setOutputData(JSONUtil.toJsonStr(currentData));
+            instance.setFinishedAt(new Date());
+            instanceDao.updateById(instance);
+            return;
+        }
+
+        instance.setStatus(WfInstance.STATUS_RUNNING);
+        instance.setCurrentNodeId(nextNodeId);
+        instanceDao.updateById(instance);
+
+        try {
+            executeFromNode(instance, graph, ctx, currentData, nextNodeId);
+        } catch (Exception e) {
+            instance.setStatus(WfInstance.STATUS_FAILED);
+            instance.setErrorMsg(e.getMessage());
+            instance.setFinishedAt(new Date());
+            instanceDao.updateById(instance);
+            throw new RuntimeException("审批后恢复流程失败: " + e.getMessage(), e);
+        }
+    }
+
+    private String resolveApprovalNextNode(WfGraph graph, String pausedNodeId, boolean approved) {
+        List<WfGraph.Edge> edges = graph.getEdges() == null ? Collections.emptyList() : graph.getEdges();
+        List<WfGraph.Edge> outgoing = new ArrayList<>();
+        for (WfGraph.Edge edge : edges) {
+            if (pausedNodeId.equals(edge.getSource())) {
+                outgoing.add(edge);
+            }
+        }
+        if (outgoing.isEmpty()) return null;
+
+        List<String> preferredLabels = approved
+            ? Arrays.asList("approve", "approved", "pass", "通过", "同意", "true")
+            : Arrays.asList("reject", "rejected", "refuse", "驳回", "拒绝", "false");
+
+        for (WfGraph.Edge edge : outgoing) {
+            String label = edge.getData() != null ? edge.getData().getLabel() : null;
+            if (label == null) continue;
+            String lower = label.toLowerCase(Locale.ROOT);
+            for (String keyword : preferredLabels) {
+                if (lower.contains(keyword.toLowerCase(Locale.ROOT))) {
+                    return edge.getTarget();
+                }
+            }
+        }
+
+        return outgoing.get(0).getTarget();
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseJsonMap(String json) {
+        if (json == null || json.isBlank()) {
+            return new HashMap<>();
+        }
+        return JSONUtil.toBean(json, HashMap.class);
     }
 }

@@ -19,6 +19,12 @@ import java.util.*;
 @Data
 public class ExecutionContext {
 
+    @FunctionalInterface
+    public interface ApprovalTaskCallback {
+        Long create(String nodeId, String nodeName, Integer assigneeType, String assigneeExpr,
+                    String title, String content);
+    }
+
     private WfGraph graph;
     private Long instanceId;
     private Long initiatorId;
@@ -41,6 +47,9 @@ public class ExecutionContext {
     /** 审批任务 ID → nodeId（反向索引）*/
     private Map<Long, String> taskNodeMap = new HashMap<>();
 
+    /** 审批任务创建回调 */
+    private ApprovalTaskCallback approvalTaskCallback;
+
     // ==================== 审批任务管理 ====================
 
     /**
@@ -50,8 +59,19 @@ public class ExecutionContext {
     public Long createApprovalTask(String nodeId, String nodeName,
             Integer assigneeType, String assigneeExpr,
             String title, String content) {
-        // 由 WorkflowEngine 在执行时通过回调注入
-        throw new UnsupportedOperationException("需要通过 WorkflowEngine 注入");
+        if (approvalTaskCallback == null) {
+            throw new UnsupportedOperationException("审批任务回调尚未注入");
+        }
+        Long taskId = approvalTaskCallback.create(nodeId, nodeName, assigneeType, assigneeExpr, title, content);
+        if (taskId != null) {
+            approvalTaskMap.put(nodeId, taskId);
+            taskNodeMap.put(taskId, nodeId);
+        }
+        return taskId;
+    }
+
+    public String findNodeIdByTaskId(Long taskId) {
+        return taskNodeMap.get(taskId);
     }
 
     // ==================== 节点路由 ====================

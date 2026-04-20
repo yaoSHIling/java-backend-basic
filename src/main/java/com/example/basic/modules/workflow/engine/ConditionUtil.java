@@ -51,7 +51,7 @@ public class ConditionUtil {
         }
 
         try {
-            String evalExpr = prepareExpression(expression.trim(), variables);
+            String evalExpr = normalizeExpression(prepareExpression(expression.trim(), variables));
             Object result = SCRIPT_ENGINE.eval(evalExpr);
             return Boolean.TRUE.equals(result);
         } catch (Exception e) {
@@ -65,7 +65,7 @@ public class ConditionUtil {
      */
     public static Number evalNumber(String expression, Map<String, Object> variables) {
         try {
-            String evalExpr = prepareExpression(expression.trim(), variables);
+            String evalExpr = normalizeExpression(prepareExpression(expression.trim(), variables));
             Object result = SCRIPT_ENGINE.eval(evalExpr);
             if (result instanceof Number) return (Number) result;
             return Double.parseDouble(String.valueOf(result));
@@ -80,8 +80,6 @@ public class ConditionUtil {
      */
     private static String prepareExpression(String expr, Map<String, Object> variables) {
         if (variables == null || variables.isEmpty()) return expr;
-
-        String result = expr;
 
         // 匹配变量名
         Matcher matcher = VAR_PATTERN.matcher(expr);
@@ -112,6 +110,14 @@ public class ConditionUtil {
     }
 
     /**
+     * 兼容更贴近业务的表达式写法，如: value in ['a','b']
+     */
+    private static String normalizeExpression(String expr) {
+        if (expr == null) return null;
+        return expr.replaceAll("(.+?)\\s+in\\s+(\\[.*\\])", "$2.includes($1)");
+    }
+
+    /**
      * 支持点号访问嵌套属性，如 user.age → variables.get("user").get("age")
      */
     private static Object resolveNestedVar(String varName, Map<String, Object> variables) {
@@ -137,8 +143,8 @@ public class ConditionUtil {
      * 转义 JavaScript 字符串中的特殊字符
      */
     private static String escapeJavaScriptString(String s) {
-        return s.replace("\", "\\")
-                .replace("'", "\'")
+        return s.replace("\\", "\\\\")
+                .replace("'", "\\'")
                 .replace("\n", "\\n")
                 .replace("\r", "\\r")
                 .replace("\t", "\\t");

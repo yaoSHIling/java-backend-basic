@@ -143,7 +143,7 @@ public class VariableResolver {
         if (expr == null || expr.isEmpty()) return null;
 
         // 纯变量名
-        if (!expr.contains("[") && !expr.contains(".") && !expr.contains(""")) {
+        if (!expr.contains("[") && !expr.contains(".")) {
             return context.get(expr);
         }
 
@@ -158,7 +158,7 @@ public class VariableResolver {
 
     private Object evalJsonPath(String expr) {
         // 简化版 JSONPath：支持 a[0].b 或 a[0]["b"]
-        String[] parts = expr.split("[.\[\]"]+");
+        String[] parts = expr.split("[.\\[\\]\"]+");
         Object current = null;
 
         for (int i = 0; i < parts.length; i++) {
@@ -195,7 +195,7 @@ public class VariableResolver {
         if (v instanceof Number) return ((Number) v).intValue();
         try {
             return Integer.parseInt(String.valueOf(v));
-        } catch {
+        } catch (Exception e) {
             return defaultValue;
         }
     }
@@ -207,7 +207,7 @@ public class VariableResolver {
         if (v instanceof Number) return ((Number) v).doubleValue();
         try {
             return Double.parseDouble(String.valueOf(v));
-        } catch {
+        } catch (Exception e) {
             return defaultValue;
         }
     }

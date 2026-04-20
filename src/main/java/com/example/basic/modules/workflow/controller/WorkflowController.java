@@ -12,7 +12,7 @@ import com.example.basic.modules.workflow.entity.WfDefinition;
 import com.example.basic.modules.workflow.entity.WfInstance;
 import com.example.basic.modules.workflow.entity.WfInstanceLog;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.metadata.IPage;
+
 import com.example.basic.modules.workflow.dao.WfDefinitionDao;
 import com.example.basic.modules.workflow.dao.WfInstanceDao;
 import com.example.basic.modules.workflow.dao.WfInstanceLogDao;
@@ -72,7 +72,7 @@ public class WorkflowController {
     @Login
     public Result<WfDefinition> getDefinition(@PathVariable Long id) {
         WfDefinition def = definitionDao.selectById(id);
-        def.setGraphData(def.getGraphData()); // JSON 字段
+        if (def == null) return Result.fail(500, "工作流不存在");
         return Result.success(def);
     }
 
@@ -95,10 +95,14 @@ public class WorkflowController {
         def.setName(dto.getName());
         def.setCode(dto.getCode());
         def.setDescription(dto.getDescription());
-        def.setGraphData(JSONUtil.toJson(dto.getGraphData()));
-        def.setVariables(dto.getVariables() != null ? JSONUtil.toJson(dto.getVariables()) : null);
+        def.setGraphData(JSONUtil.toJsonStr(dto.getGraphData()));
+        def.setVariables(dto.getVariables() != null ? JSONUtil.toJsonStr(dto.getVariables()) : null);
         def.setUpdatedTime(new Date());
-        definitionDao.insertOrUpdate(def);
+        if (def.getId() == null) {
+            definitionDao.insert(def);
+        } else {
+            definitionDao.updateById(def);
+        }
         return Result.success(def.getId());
     }
 
@@ -108,10 +112,10 @@ public class WorkflowController {
     @LogOperation("发布工作流")
     public Result<Void> publish(@PathVariable Long id) {
         WfDefinition def = definitionDao.selectById(id);
-        if (def == null) return Result.fail("工作流不存在");
+        if (def == null) return Result.fail(500, "工作流不存在");
         def.setStatus(WfDefinition.STATUS_PUBLISHED);
         definitionDao.updateById(def);
-        return Result.success("发布成功");
+        return Result.success(null, "发布成功");
     }
 
     @Operation(summary = "禁用工作流")
@@ -120,10 +124,10 @@ public class WorkflowController {
     @LogOperation("禁用工作流")
     public Result<Void> disable(@PathVariable Long id) {
         WfDefinition def = definitionDao.selectById(id);
-        if (def == null) return Result.fail("工作流不存在");
+        if (def == null) return Result.fail(500, "工作流不存在");
         def.setStatus(WfDefinition.STATUS_DISABLED);
         definitionDao.updateById(def);
-        return Result.success("禁用成功");
+        return Result.success(null, "禁用成功");
     }
 
     @Operation(summary = "删除工作流")
@@ -132,13 +136,13 @@ public class WorkflowController {
     @LogOperation("删除工作流")
     public Result<Void> deleteDefinition(@PathVariable Long id) {
         definitionDao.deleteById(id);
-        return Result.success("删除成功");
+        return Result.success(null, "删除成功");
     }
 
     // ==================== 流程执行 ====================
 
     @Operation(summary = "触发工作流（同步执行）")
-    @PostMapping "/trigger/{definitionCode}")
+    @PostMapping("/trigger/{definitionCode}")
     @Login
     @LogOperation("触发工作流")
     public Result<Long> trigger(
@@ -152,10 +156,10 @@ public class WorkflowController {
                 .eq(WfDefinition::getCode, definitionCode)
                 .eq(WfDefinition::getStatus, WfDefinition.STATUS_PUBLISHED)
         );
-        if (def == null) return Result.fail("工作流不存在或未发布");
+        if (def == null) return Result.fail(500, "工作流不存在或未发布");
 
-        WfGraph graph = JSONUtil.toJson(def.getGraphData(), WfGraph.class);
-        Long instanceId = workflowEngine.startSync(graph, dto.getData(), userId);
+        WfGraph graph = JSONUtil.toBean(def.getGraphData(), WfGraph.class);
+        Long instanceId = workflowEngine.startSync(def.getId(), def.getCode(), graph, dto.getData(), userId);
         return Result.success(instanceId);
     }
 
@@ -182,12 +186,14 @@ public class WorkflowController {
     @Login
     public Result<PageResult<WfInstance>> myInstances(
             @Parameter(description = "状态") Integer status,
+            @Parameter(description = "关键字") String keyword,
             PageParams pageParams,
             HttpServletRequest request) {
         Long userId = JwtUtil.getLoginUser(request).getUserId();
         LambdaQueryWrapper<WfInstance> w = new LambdaQueryWrapper<>();
         w.eq(WfInstance::getInitiatorId, userId);
         if (status != null) w.eq(WfInstance::getStatus, status);
+        if (keyword != null && !keyword.isBlank()) w.like(WfInstance::getDefinitionCode, keyword);
         w.orderByDesc(WfInstance::getStartedAt);
         return Result.success(PageResult.of(instanceDao.selectPage(pageParams.toPage(), w)));
     }
@@ -198,7 +204,7 @@ public class WorkflowController {
     @PostMapping("/callback/approve")
     public Result<Void> approveCallback(@RequestBody ApproveCallbackDTO dto) {
         workflowEngine.resumeFromApproval(dto.getInstanceId(), dto.getTaskId(), dto.isApproved(), dto.getOpinion());
-        return Result.success("回调成功");
+        return Result.success(null, "回调成功");
     }
 
     // ==================== DTO ====================

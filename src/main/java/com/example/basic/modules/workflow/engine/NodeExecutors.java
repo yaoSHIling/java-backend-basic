@@ -1,11 +1,6 @@
 package com.example.basic.modules.workflow.engine;
 
 import cn.hutool.core.util.StrUtil;
-import cn.hutool.extra.expression.ExpressionUtil;
-import com.example.basic.modules.workflow.engine.NodeExecutor;
-import com.example.basic.modules.workflow.engine.WfGraph;
-import com.example.basic.modules.workflow.engine.WfNodeResult;
-import com.example.basic.modules.workflow.engine.ExecutionContext;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
@@ -72,10 +67,12 @@ public class NodeExecutors {
             try {
                 WfGraph.NodeData data = node.getData();
                 String model = data.getModel() != null ? data.getModel() : "MiniMax-M*";
-                String prompt = renderTemplate(data.getPrompt(), inputData);
-                String systemPrompt = renderTemplate(data.getSystemPrompt(), inputData);
+                VariableResolver resolver = new VariableResolver(inputData);
+                String prompt = resolver.render(data.getPrompt());
+                String systemPrompt = resolver.render(data.getSystemPrompt());
 
-                log.info("LLM节点调用 | model={} | prompt={}", model, prompt.substring(0, Math.min(50, prompt.length())));
+                log.info("LLM节点调用 | model={} | prompt={}", model,
+                    prompt == null ? "" : prompt.substring(0, Math.min(50, prompt.length())));
 
                 // TODO: 实际调用 AI 接口（MiniMax / OpenAI / Claude）
                 // 这里先用占位符，后续接入 Coze API 或直接调用 MiniMax
@@ -152,7 +149,7 @@ public class NodeExecutors {
 
                 // 遍历条件，找到第一个满足的分支
                 for (WfGraph.Branch branch : branches) {
-                    if (evalCondition(branch.getConditionExpr(), inputData)) {
+                    if (ConditionUtil.eval(branch.getConditionExpr(), inputData)) {
                         log.info("条件命中 | nodeId={} | branch={} | expr={}",
                             node.getId(), branch.getName(), branch.getConditionExpr());
                         Map<String, Object> output = new HashMap<>(inputData);
@@ -175,24 +172,6 @@ public class NodeExecutors {
                 return WfNodeResult.failure(node.getId(), e.getMessage(), System.currentTimeMillis() - start);
             }
         }
-
-        private boolean evalCondition(String expr, Map<String, Object> vars) {
-            if (StrUtil.isBlank(expr)) return false;
-            try {
-                String evalExpr = expr;
-                for (Map.Entry<String, Object> e : vars.entrySet()) {
-                    Object v = e.getValue();
-                    if (v == null) continue;
-                    String sv = v instanceof String ? "\"" + v + "\"" : String.valueOf(v);
-                    evalExpr = evalExpr.replace(e.getKey(), sv);
-                }
-                Object result = new ScriptEngineManager().getEngineByName("JavaScript").eval(evalExpr);
-                return Boolean.TRUE.equals(result);
-            } catch (Exception e) {
-                log.warn("条件计算失败 | expr={} | error={}", expr, e.getMessage());
-                return false;
-            }
-        }
     }
 
     // ==================== 审批节点 ====================
@@ -206,8 +185,9 @@ public class NodeExecutors {
                 WfGraph.NodeData data = node.getData();
 
                 // 渲染标题和内容
-                String title = renderTemplate(data.getTitleTemplate(), inputData);
-                String content = renderTemplate(data.getContentTemplate(), inputData);
+                VariableResolver resolver = new VariableResolver(inputData);
+                String title = resolver.render(data.getTitleTemplate());
+                String content = resolver.render(data.getContentTemplate());
 
                 // 创建审批任务（入库，等待人工处理）
                 Long taskId = context.createApprovalTask(
@@ -244,15 +224,16 @@ public class NodeExecutors {
             long start = System.currentTimeMillis();
             try {
                 WfGraph.NodeData data = node.getData();
-                String url = renderTemplate(data.getUrl(), inputData);
+                VariableResolver resolver = new VariableResolver(inputData);
+                String url = resolver.render(data.getUrl());
                 String method = data.getMethod() != null ? data.getMethod() : "GET";
 
                 HttpHeaders headers = new HttpHeaders();
                 if (data.getHeaders() != null) {
-                    data.getHeaders().forEach((k, v) -> headers.add(k, renderTemplate(v, inputData)));
+                    data.getHeaders().forEach((k, v) -> headers.add(k, resolver.render(v)));
                 }
 
-                HttpEntity<Object> entity = new HttpEntity<>(data.getBody(), headers);
+                HttpEntity<Object> entity = new HttpEntity<>(resolver.renderMap(data.getBody()), headers);
                 ResponseEntity<Map> response = restTemplate.exchange(url, HttpMethod.valueOf(method), entity, Map.class);
 
                 Map<String, Object> output = new HashMap<>(inputData);
@@ -281,8 +262,11 @@ public class NodeExecutors {
 
                 if (data.getVariableValue() != null) {
                     // 设置变量
-                    context.setVariable(data.getVariableName(), data.getVariableValue());
-                    output.put(data.getVariableName(), data.getVariableValue());
+                    Object value = data.getVariableValue() instanceof String
+                        ? new VariableResolver(inputData).render((String) data.getVariableValue())
+                        : data.getVariableValue();
+                    context.setVariable(data.getVariableName(), value);
+                    output.put(data.getVariableName(), value);
                 } else {
                     // 读取变量（从 context 取出写入 output）
                     Object v = context.getVariable(data.getVariableName());
@@ -365,8 +349,9 @@ public class NodeExecutors {
             try {
                 WfGraph.NodeData data = node.getData();
                 String channel = data.getChannel() != null ? data.getChannel() : "log";
-                String title = renderTemplate(data.getTitle(), inputData);
-                String content = renderTemplate(data.getContent(), inputData);
+                VariableResolver resolver = new VariableResolver(inputData);
+                String title = resolver.render(data.getTitle());
+                String content = resolver.render(data.getContent());
 
                 log.info("[{}] 消息发送 | title={} | to={}", channel, title, data.getToUser());
 
@@ -395,7 +380,7 @@ public class NodeExecutors {
             long start = System.currentTimeMillis();
             try {
                 WfGraph.NodeData data = node.getData();
-                String sql = renderTemplate(data.getSql(), inputData);
+                String sql = new VariableResolver(inputData).render(data.getSql());
                 Boolean isSelect = data.getIsSelect();
 
                 log.info("数据库节点 | sql={} | isSelect={}", sql, isSelect);
@@ -421,12 +406,6 @@ public class NodeExecutors {
      * 支持嵌套引用，如：Hello {{ user.name }}
      */
     public static String renderTemplate(String template, Map<String, Object> vars) {
-        if (template == null) return null;
-        String result = template;
-        for (Map.Entry<String, Object> e : vars.entrySet()) {
-            result = result.replace("{{ " + e.getKey() + " }}", String.valueOf(e.getValue()));
-            result = result.replace("{{" + e.getKey() + "}}", String.valueOf(e.getValue()));
-        }
-        return result;
+        return new VariableResolver(vars).render(template);
     }
 }
