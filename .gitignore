@@ -1,24 +1,35 @@
-# Compiled class file
-*.class
-
-# Log file
-*.log
-
-# BlueJ files
-*.ctxt
-
-# Mobile Tools for Java (J2ME)
-.mtj.tmp/
-
-# Package Files #
+# Maven
+target/
 *.jar
 *.war
-*.nar
-*.ear
-*.zip
-*.tar.gz
-*.rar
 
-# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
-hs_err_pid*
-replay_pid*
+# IDEA / Eclipse
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+.classpath
+.project
+.settings/
+
+# Spring Boot
+spring-boot-devtools.properties
+*.log
+logs/
+
+# 上传的文件（不要提交到 Git）
+uploads/
+files/
+
+# 敏感配置
+.env
+*.env.local
+
+# Docker 数据卷
+docker/mysql_data/
+docker/redis_data/
+
+# OS
+.DS_Store
+Thumbs.db

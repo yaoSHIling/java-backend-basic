@@ -14,56 +14,179 @@
 
     <groupId>com.example</groupId>
     <artifactId>java-backend-basic</artifactId>
-    <version>1.0.0</version>
+    <version>2.0.0</version>
     <packaging>jar</packaging>
     <name>java-backend-basic</name>
-    <description>Java后端基础框架学习项目</description>
+    <description>🔥 Java后端快速开发脚手架 | 适合 OA/CRM/后台管理/接口服务 等常见系统</description>
 
+    <!-- ===========================================================================
+         版本锁定：所有第三方依赖在此统一管理，避免版本冲突
+         =========================================================================== -->
     <properties>
-        <java.version>17</java.version>
-        <maven.compiler.source>17</maven.compiler.source>
-        <maven.compiler.target>17</maven.compiler.target>
+        <java.version>21</java.version>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- 第三方依赖版本 -->
+        <mybatis-plus.version>3.5.6</mybatis-plus.version>
+        <jjwt.version>0.12.5</jjwt.version>
+        <hutool.version>5.8.26</hutool.version>
+        <druid.version>1.2.21</druid.version>
+        <fastjson2.version>2.0.48</fastjson2.version>
+        <springdoc.version>2.3.0</springdoc.version>
+        <commons-io.version>2.15.1</commons-io.version>
+        <commons-fileupload.version>1.5</commons-fileupload.version>
+        <transmittable-thread-local.version>2.14.5</transmittable-thread-local.version>
     </properties>
 
     <dependencies>
-        <!-- Spring Boot Web -->
+        <!-- ================================================================
+             Spring Boot 核心（Web / AOP / Validation / 自动化配置）
+             ================================================================ -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
-
-        <!-- Spring Boot Data JPA -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-jpa</artifactId>
+            <artifactId>spring-boot-starter-aop</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
 
-        <!-- MySQL Driver -->
+        <!-- ================================================================
+             数据层
+             ================================================================ -->
+        <!-- MyBatis-Plus：MySQL 增强 ORM，比 JPA 更灵活、比手写 MyBatis 更高效 -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+            <version>${mybatis-plus.version}</version>
+        </dependency>
+        <!-- MySQL 驱动 -->
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>
             <scope>runtime</scope>
         </dependency>
+        <!-- Druid 连接池：提供强大的监控页面，线上必用 -->
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>druid-spring-boot-3-starter</artifactId>
+            <version>${druid.version}</version>
+        </dependency>
+        <!-- Redis 缓存 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        <!-- Redis 连接池（Lettuce 默认已引入，引入 pool 获得更高性能） -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+        </dependency>
 
-        <!-- Lombok -->
+        <!-- ================================================================
+             安全认证
+             ================================================================ -->
+        <!-- JWT：接口无状态认证 token -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>${jjwt.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- ================================================================
+             工具库
+             ================================================================ -->
+        <!-- Hutool：Java 工具集天花板，涵盖字符串/日期/加密/HTTP/JSON/ID生成等 -->
+        <dependency>
+            <groupId>cn.hutool</groupId>
+            <artifactId>hutool-all</artifactId>
+            <version>${hutool.version}</version>
+        </dependency>
+        <!-- FastJSON2：高性能 JSON 序列化 -->
+        <dependency>
+            <groupId>com.alibaba.fastjson2</groupId>
+            <artifactId>fastjson2</artifactId>
+            <version>${fastjson2.version}</version>
+        </dependency>
+        <!-- 文件上传常用工具 -->
+        <dependency>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+            <version>${commons-io.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>commons-fileupload</groupId>
+            <artifactId>commons-fileupload</artifactId>
+            <version>${commons-fileupload.version}</version>
+        </dependency>
+
+        <!-- ================================================================
+             API 文档
+             ================================================================ -->
+        <!-- SpringDoc OpenAPI 3（兼容 OpenAPI 3.0 + Swagger UI） -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>${springdoc.version}</version>
+        </dependency>
+
+        <!-- ================================================================
+             代码简化
+             ================================================================ -->
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <optional>true</optional>
         </dependency>
 
-        <!-- Validation -->
+        <!-- ================================================================
+             线程上下文（保证 ThreadLocal 在线程池间传递）
+             ================================================================ -->
         <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-validation</artifactId>
+            <groupId>com.alibaba</groupId>
+            <artifactId>transmittable-thread-local</artifactId>
+            <version>${transmittable-thread-local.version}</version>
         </dependency>
 
-        <!-- Test -->
+        <!-- ================================================================
+             测试
+             ================================================================ -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
+        </dependency>
+
+        <!-- ================================================================
+             开发工具（仅运行时有效，打包自动排除）
+             ================================================================ -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-devtools</artifactId>
+            <scope>runtime</scope>
+            <optional>true</optional>
         </dependency>
     </dependencies>
 
@@ -73,6 +196,7 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <configuration>
+                    <!-- 打包时排除 Lombok 编译产物，仅保留运行时注解处理结果 -->
                     <excludes>
                         <exclude>
                             <groupId>org.projectlombok</groupId>

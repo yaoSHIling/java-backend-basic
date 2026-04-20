@@ -1,26 +1,147 @@
+# =====================================================================
+# Java 后端快速开发脚手架配置文件
+# 常见系统配置示例：OA / CRM / 后台管理 / 接口服务
+# =====================================================================
+# ⚠️ 正式环境请将敏感信息（密码/密钥）移至环境变量或专门的配置中心
+# =====================================================================
+
 spring:
   application:
     name: java-backend-basic
 
+  # ========================== 数据源（Druid） ==========================
   datasource:
+    type: com.alibaba.druid.pool.DruidDataSource
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/java_backend_basic?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai
-    username: root
-    password: ${DB_PASSWORD:your_password_here}
+    # 📌 正式环境：将密码放在环境变量 DB_PASSWORD 中，不要硬编码在文件中
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:java_backend_basic}?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true
+    username: ${DB_USER:root}
+    password: ${DB_PASSWORD:root}
+    # 连接池配置（生产级别）
+    druid:
+      initial-size: 5                    # 初始连接数
+      min-idle: 5                        # 最小空闲连接
+      max-active: 20                     # 最大活跃连接
+      max-wait: 60000                    # 获取连接超时（ms）
+      time-between-eviction-runs-millis: 60000  # 清理线程运行周期
+      min-evictable-idle-time-millis: 300000     # 连接最小空闲时间
+      validation-query: SELECT 1         # 检测连接可用性 SQL
+      test-while-idle: true
+      test-on-borrow: false
+      test-on-return: false
+      pool-prepared-statements: true     # 启用 PreparedStatement 缓存
+      max-pool-prepared-statement-per-connection-size: 20
+      # 开启 Druid 监控页面（生产环境建议通过网关限制访问）
+      stat-view-servlet:
+        enabled: true
+        url-pattern: /druid/*
+        login-username: admin
+        login-password: ${DRUID_PASSWORD:admin123}
+      # 开启 SQL 监控（记录所有执行过的 SQL）
+      web-stat-filter:
+        enabled: true
+        url-pattern: /*
+        exclusions: "*.js,*.gif,*.jpg,*.png,*.css,*.ico,/druid/*"
 
-  jpa:
-    hibernate:
-      ddl-auto: update
-    show-sql: true
-    properties:
-      hibernate:
-        dialect: org.hibernate.dialect.MySQLDialect
-        format_sql: true
+  # ========================== JPA / MyBatis-Plus ==========================
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: 0
+      timeout: 10s
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 8
+          min-idle: 2
+          max-wait: -1ms
 
+# MyBatis-Plus 全局配置
+mybatis-plus:
+  mapper-locations: classpath*:mapper/**/*.xml   # Mapper XML 路径
+  type-aliases-package: com.example.basic.model.entity  # 实体类别名包
+  global-config:
+    db-config:
+      # 逻辑删除：deleted=1 表示已删除，查询自动过滤 deleted=1 的记录
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+      # 主键生成策略：雪花算法（默认）
+      id-type: auto
+      # 自动填充：创建时间/更新时间由 MyBatis-Plus MetaObjectHandler 自动维护
+      # （无需在 SQL 中手动处理）
+  configuration:
+    map-underscore-to-camel-case: true  # 数据库下划线字段 → Java 驼峰命名自动映射
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl  # 开发时打印 SQL（生产改为 log4j2）
+
+# ========================== JWT 配置 ==========================
+jwt:
+  # 📌 必改：生产环境使用更复杂的随机字符串，并放在环境变量中
+  secret: ${JWT_SECRET:your-secret-key-change-in-production-env}
+  # Token 有效期（单位：毫秒），默认 7 天
+  expiration: ${JWT_EXPIRATION:604800000}
+  # Token 前缀（放在 Authorization Header 时使用）
+  token-prefix: Bearer
+  # Header 名称
+  header-name: Authorization
+
+# ========================== 文件上传配置 ==========================
+file:
+  # 上传文件存储根目录（支持绝对路径或 classpath 相对路径）
+  upload-dir: ${FILE_UPLOAD_DIR:./uploads}
+  # 允许的单文件最大大小（默认 10MB）
+  max-file-size: 10MB
+  # 允许的最大请求大小（默认 50MB）
+  max-request-size: 50MB
+  # 允许的文件类型白名单（为空表示不限制）
+  allowed-extensions: jpg,jpeg,png,gif,pdf,doc,docx,xls,xlsx,zip,txt
+
+# ========================== 服务端口 ==========================
 server:
-  port: 8080
+  port: ${SERVER_PORT:8080}
+  servlet:
+    context-path: /api
+  tomcat:
+    threads:
+      max: 200
+      min-spare: 10
 
+# ========================== Actuator 监控端点 ==========================
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+
+# ========================== 日志配置 ==========================
 logging:
   level:
+    root: INFO
     com.example.basic: DEBUG
-    org.springframework.web: INFO
+    com.baomidou.mybatisplus: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+  logback:
+    rollingpolicy:
+      max-file-size: 100MB
+      max-history: 30
+
+# ========================== SpringDoc OpenAPI 3 文档配置 ==========================
+springdoc:
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+  swagger-ui:
+    enabled: true
+    path: /swagger-ui.html
+    operations-sorter: method   # 按请求方法排序
+    tags-sorter: alpha           # 按标签字母排序
+  group-configs:
+    - group: 'default'
+      paths-to-match: '/**'
+      packages-to-scan: com.example.basic
