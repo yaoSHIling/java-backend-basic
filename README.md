@@ -839,9 +839,11 @@ CREATE TABLE crm_followup_task (
 
 ---
 
-## 13. 场景案例：Coze 风格工作流引擎（可视化编排）
+## 13. 场景案例：Coze 风格工作流引擎
 
-> 参考 [Coze 工作流模型](https://github.com/coze-dev/coze-studio) 实现，拖拽式流程设计器 + 图执行引擎，支持 **12 种节点类型**。
+> 参考 [Coze 工作流模型](https://github.com/coze-dev/coze-studio) 实现，拖拽式可视化画布 + 图执行引擎，支持 **12 种节点类型**。
+
+---
 
 ### 13.1 数据库设计
 
@@ -851,23 +853,28 @@ CREATE TABLE crm_followup_task (
 |------|------|
 | `wf_definition` | 工作流定义（名称/编码/graphData JSON）|
 | `wf_instance` | 工作流实例（每次运行生成一条）|
-| `wf_instance_log` | 执行日志（每个节点运行记录一条）|
+| `wf_instance_log` | 节点执行日志（耗时/输入/输出/错误）|
+
+---
 
 ### 13.2 支持的节点类型（共 12 种）
 
 #### 基础节点
+
 | 类型 | 说明 | 核心配置 |
 |------|------|---------|
 | `start` | 开始节点 | 输入参数定义 |
 | `end` | 结束节点 | 返回输出 |
 
 #### AI / 代码节点
+
 | 类型 | 说明 | 核心配置 |
 |------|------|---------|
 | `llm` | 大模型节点 | model / prompt / systemPrompt |
 | `code` | 代码节点 | language / code（JavaScript）|
 
 #### 逻辑节点
+
 | 类型 | 说明 | 核心配置 |
 |------|------|---------|
 | `condition` | 条件分支 | branches[] / defaultBranch |
@@ -875,6 +882,7 @@ CREATE TABLE crm_followup_task (
 | `loop` | 循环节点 | loopType(for/while) / loopTimes |
 
 #### 业务节点
+
 | 类型 | 说明 | 核心配置 |
 |------|------|---------|
 | `approval` | 人工审批 | assigneeType / assigneeExpr / titleTemplate |
@@ -883,32 +891,22 @@ CREATE TABLE crm_followup_task (
 | `database` | 数据库 SQL | sql / isSelect |
 | `subflow` | 子流程调用 | subflowCode |
 
+---
+
 ### 13.3 节点数据结构（与前端 Vue Flow 一致）
 
 ```json
 {
   "nodes": [
+    { "id": "node_start", "type": "start", "position": { "x": 200, "y": 50 }, "data": { "name": "开始" } },
     {
-      "id": "node_start",
-      "type": "start",
-      "position": { "x": 200, "y": 50 },
-      "data": { "name": "开始" }
-    },
-    {
-      "id": "node_llm",
-      "type": "llm",
-      "position": { "x": 200, "y": 150 },
-      "data": {
-        "name": "AI 生成报告",
-        "model": "MiniMax-M*",
+      "id": "node_llm", "type": "llm", "position": { "x": 200, "y": 150 },
+      "data": { "name": "AI 生成报告", "model": "MiniMax-M*",
         "prompt": "请为 {{ company }} 生成一份{{ type }}报告",
-        "systemPrompt": "你是一个专业的行业分析师"
-      }
+        "systemPrompt": "你是一个专业的行业分析师" }
     },
     {
-      "id": "node_cond",
-      "type": "condition",
-      "position": { "x": 200, "y": 280 },
+      "id": "node_cond", "type": "condition", "position": { "x": 200, "y": 280 },
       "data": {
         "name": "金额判断",
         "branches": [
@@ -925,53 +923,137 @@ CREATE TABLE crm_followup_task (
 }
 ```
 
+---
+
 ### 13.4 引擎执行流程
 
 ```
 加载 WfGraph（nodes + edges）
        ↓
-  找到 start 节点
+GraphUtil.hasCycle() → 校验是否为 DAG（有环则报错）
        ↓
-  NodeExecutor.execute()  ─→ WfNodeResult { status, outputData, nextNodeId }
+  拓扑排序 topologicalSort()
        ↓
-  查找下一节点（从 edges）
+  找到 start 节点 → 开始主循环
        ↓
-  Condition 节点：evalCondition() 计算条件表达式，走对应分支
+  NodeExecutor.execute()
        ↓
-  Approval 节点：创建任务 → 暂停 → 等待人工审批回调
+  ConditionNode: ConditionUtil.eval() 计算条件表达式 → 走对应分支
        ↓
-  End 节点：流程结束，记录 outputData
+  ApprovalNode: 创建任务 → 暂停 → 等待人工回调
+       ↓
+  EndNode: WorkflowEngine.setFinalOutput() → 流程结束
+       ↓
+  WorkflowEngine.executeGraph() 主循环，最多 1000 节点
 ```
+
+---
 
 ### 13.5 核心类结构
 
 ```
 workflow/engine/
-├── WfGraph.java           图结构（Node/Edge/NodeData）
-├── WfNodeResult.java      节点执行结果
-├── ExecutionContext.java  执行上下文（变量/路由/审批回调）
-├── WorkflowEngine.java     图执行引擎（主循环）
-└── NodeExecutors.java     12种节点执行器（Start/End/LLM/Code/Condition/Approval/HTTP/Variable/Loop/Subflow/Message/Database）
+├── WfGraph.java              图结构（Node/Edge/NodeData/Branch）
+├── WfNodeResult.java         节点执行结果（status/outputData/nextNodeId）
+├── ExecutionContext.java     执行上下文（变量/路由/审批回调）
+├── WorkflowEngine.java       图执行引擎（主循环，1000节点上限防死循环）
+│
+├── NodeExecutor.java         节点执行器接口
+├── NodeExecutors.java        12种节点执行器（内部类）
+│   StartNode/LLMNode/CodeNode/ConditionNode/ApprovalNode/
+│   HTTPNode/VariableNode/LoopNode/SubflowNode/MessageNode/DatabaseNode
+│
+├── GraphUtil.java            图工具（DAG检测/拓扑排序/可达性/路径查找）
+├── ConditionUtil.java         条件表达式求值（支持变量/数组/字符串比较）
+└── VariableResolver.java      变量解析器（{{ template }}渲染/JSONPath/类型转换）
 ```
 
-### 13.6 API 接口
+---
+
+### 13.6 工具类详解
+
+#### GraphUtil（）
+
+```java
+// DAG 检测（防止循环依赖）
+boolean hasCycle = GraphUtil.hasCycle(graph);
+
+// 拓扑排序（Kahn算法）
+List<String> order = GraphUtil.topologicalSort(graph);
+// → ["node_start", "node_llm", "node_condition", "node_end"]
+
+// 可达性分析
+Set<String> reachable = GraphUtil.reachableFrom(graph, "node_start");
+
+// 前驱/后继节点
+List<String> successors = GraphUtil.getSuccessors(graph, "node_llm");
+List<String> predecessors = GraphUtil.getPredecessors(graph, "node_approval");
+
+// 路径是否存在
+boolean hasPath = GraphUtil.hasPath(graph, "node_start", "node_end");
+```
+
+#### ConditionUtil（）
+
+```java
+// 基础比较
+ConditionUtil.eval("amount > 1000", Map.of("amount", 1500)); // true
+
+// 字符串比较
+ConditionUtil.eval("type == 'reimburse'", Map.of("type", "reimburse")); // true
+
+// 复合条件
+ConditionUtil.eval("amount > 1000 && level >= 3", vars);
+
+// 支持变量嵌套属性
+ConditionUtil.eval("user.age >= 18", vars);
+
+// in 数组
+ConditionUtil.eval("status in ['pending', 'approved']", vars);
+```
+
+#### VariableResolver（）
+
+```java
+VariableResolver resolver = new VariableResolver(vars);
+
+// 模板渲染
+resolver.put("name", "张三");
+String result = resolver.render("您好，{{ name }}，您的申请金额为 {{ amount }} 元");
+
+// 批量渲染（Map 中所有字符串值）
+Map<String, Object> rendered = resolver.renderMap(formData);
+
+// 嵌套属性访问
+resolver.put("user", Map.of("name", "李四", "age", 30));
+resolver.render("用户：{{ user.name }}，年龄：{{ user.age }}"); // "用户：李四，年龄：30"
+
+// 类型转换
+Integer age = resolver.asInt("age", 0);
+Boolean flag = resolver.asBool("enabled", false);
+String str = resolver.asStr("title");
+```
+
+---
+
+### 13.7 API 接口
 
 ```bash
 # 定义管理
 GET    /workflow/definition/page       分页查询
-POST   /workflow/definition             创建/更新
-GET    /workflow/definition/{id}        详情
-POST   /workflow/definition/{id}/publish 发布
-POST   /workflow/definition/{id}/disable 禁用
+POST   /workflow/definition            创建/更新
+GET    /workflow/definition/{id}       详情
+POST   /workflow/definition/{id}/publish  发布
+POST   /workflow/definition/{id}/disable  禁用
 DELETE /workflow/definition/{id}        删除
 
 # 执行
 POST   /workflow/trigger/{code}          触发工作流（同步）
 GET    /workflow/instance/{id}           实例详情
-GET    /workflow/instance/{id}/logs     执行日志
+GET    /workflow/instance/{id}/logs     执行日志（按时间线排列）
 GET    /workflow/instance/my            我的实例
 
-# 审批回调
+# 审批回调（审批人审批后，由前端调用此接口继续流程）
 POST   /workflow/callback/approve        审批完成回调
 ```
 
