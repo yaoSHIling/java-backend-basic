@@ -777,420 +777,103 @@ String content = RetryingUtil.withRetry(
 
 ---
 
-## 12. 场景案例：AI 写小说 → 自动发布到番茄小说
+# 12. 场景案例：CRM 客户跟进管理系统
 
-> 以下展示一个**完整的业务场景**，包含从需求分析到代码实现的全流程。
+> 替换为更通用的企业级 CRM 系统，包含客户管理、销售跟进、待办任务、定时提醒、多渠道通知。
 
-### 12.1 场景说明
-
-**目标：** 后端自动调用 Coze AI 工作流生成小说章节内容，存入草稿箱后推送到番茄小说平台。
-
-**流程：**
-```
-定时任务触发（每天 09:30）
-    ↓
-调用 Coze 工作流生成章节（AI 写作）
-    ↓
-内容存库（本地草稿箱）
-    ↓
-推送到番茄小说（异步，后台执行）
-    ↓
-通知作者（钉钉/Server酱）
-```
-
-### 12.2 数据库设计
+### 12.1 数据库设计
 
 ```sql
--- 小说章节草稿表
-CREATE TABLE novel_chapter (
+-- 客户表
+CREATE TABLE crm_customer (
     id              BIGINT PRIMARY KEY AUTO_INCREMENT,
-    novel_id        BIGINT      NOT NULL COMMENT '所属小说ID',
-    chapter_no      INT         NOT NULL COMMENT '章节号',
-    title           VARCHAR(200) NOT NULL COMMENT '章节标题',
-    content         LONGTEXT    NOT NULL COMMENT '章节正文',
-    word_count      INT         DEFAULT 0 COMMENT '字数',
-    status          TINYINT     NOT NULL DEFAULT 0 COMMENT '状态：0=草稿 1=已发布 2=发布失败',
-    published_at    DATETIME    COMMENT '发布时间',
-    coze_run_id     VARCHAR(64) COMMENT 'Coze工作流执行ID',
-    error_msg       VARCHAR(500) COMMENT '失败原因',
-    created_time    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_time    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='小说章节草稿';
+    name            VARCHAR(100)  NOT NULL COMMENT '客户名称',
+    mobile          VARCHAR(20)   COMMENT '手机号',
+    company         VARCHAR(200)  COMMENT '公司名称',
+    industry        VARCHAR(50)   COMMENT '行业',
+    source          VARCHAR(50)   COMMENT '客户来源',
+    level           TINYINT       NOT NULL DEFAULT 3 COMMENT '等级：1=重点 2=重要 3=普通',
+    status          TINYINT       NOT NULL DEFAULT 1 COMMENT '状态：1=潜在 2=意向 3=成交 4=流失',
+    assignee_id     BIGINT        COMMENT '负责人ID',
+    last_followup_at DATETIME     COMMENT '最后跟进时间',
+    next_followup_at DATETIME     COMMENT '下次跟进时间',
+    created_time    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
--- 小说信息表
-CREATE TABLE novel_info (
+-- 跟进记录表
+CREATE TABLE crm_followup (
     id              BIGINT PRIMARY KEY AUTO_INCREMENT,
-    title           VARCHAR(200) NOT NULL COMMENT '书名',
-    author          VARCHAR(100) NOT NULL COMMENT '作者',
-    fanqie_book_id  VARCHAR(64) COMMENT '番茄小说book_id',
-    fanqie_token    VARCHAR(500) COMMENT '番茄登录Token',
-    last_chapter_no INT         DEFAULT 0 COMMENT '最后更新章节号',
-    created_time    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='小说信息';
+    customer_id     BIGINT       NOT NULL,
+    followup_type   TINYINT      NOT NULL COMMENT '1=电话 2=拜访 3=微信 4=邮件',
+    content         VARCHAR(1000) NOT NULL COMMENT '跟进内容',
+    next_plan       VARCHAR(500)  COMMENT '下次跟进计划',
+    next_followup_at DATETIME    COMMENT '下次跟进时间',
+    created_by      BIGINT       NOT NULL,
+    created_time    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 跟进任务表
+CREATE TABLE crm_followup_task (
+    id              BIGINT PRIMARY KEY AUTO_INCREMENT,
+    customer_id     BIGINT       NOT NULL,
+    title           VARCHAR(200) NOT NULL COMMENT '任务标题',
+    content         VARCHAR(500)  COMMENT '任务内容',
+    due_at          DATETIME     NOT NULL COMMENT '截止时间',
+    status          TINYINT      NOT NULL DEFAULT 0 COMMENT '0=待办 1=完成 2=逾期',
+    priority        TINYINT      NOT NULL DEFAULT 2 COMMENT '1=高 2=中 3=低',
+    assignee_id     BIGINT       NOT NULL,
+    completed_at    DATETIME     COMMENT '完成时间',
+    created_time    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 ```
 
-### 12.3 实现代码
+### 12.2 核心流程
 
-#### Step 1：NovelChapter 实体
-
-```java
-@Data
-@TableName("novel_chapter")
-public class NovelChapter extends BaseEntity {
-
-    private Long novelId;
-    private Integer chapterNo;
-    private String title;
-    private String content;
-    private Integer wordCount;
-    private Integer status;      // 0=草稿 1=已发布 2=失败
-    private Date publishedAt;
-    private String cozeRunId;
-    private String errorMsg;
-}
+**流程一：添加跟进记录**
+```
+POST /api/crm/followup
+→ CrmFollowupDao.insert()          保存跟进记录
+→ CrmCustomerDao.update()          更新最后跟进时间
+→ [有下次计划?] → CrmFollowupTaskDao.insert() 创建待办
+→ NotificationService.sendDefault() 钉钉通知
+→ 潜在客户自动升级为意向客户
 ```
 
-#### Step 2：NovelChapterService
-
-```java
-public interface NovelChapterService {
-
-    /**
-     * AI 生成并保存章节草稿
-     * @param novelId 小说ID
-     * @param chapterNo 章节号
-     * @return 章节ID
-     */
-    Long generateAndSaveDraft(Long novelId, Integer chapterNo);
-
-    /**
-     * 发布章节到番茄小说
-     * @param chapterId 章节ID
-     */
-    void publishToFanqie(Long chapterId);
-
-    /**
-     * 批量发布草稿（后台异步）
-     */
-    void batchPublishPending();
-}
+**流程二：定时逾期提醒**
+```
+每天 09:00 触发
+→ 查询超过3天未跟进的客户
+→ 按负责人分组
+→ 钉钉/Server酱通知每个负责人
+→ 更新任务逾期状态
 ```
 
-#### Step 3：NovelChapterServiceImpl（核心逻辑）
+### 12.3 定时任务
 
-```java
-@Slf4j
-@Service
-@RequiredArgsConstructor
-@Transactional(rollbackFor = Exception.class)
-public class NovelChapterServiceImpl implements NovelChapterService {
+| 时间 | 任务 | 效果 |
+|------|------|------|
+| 每天 09:00 | 检查客户逾期 | 超过3天未跟进 → 钉钉通知销售 |
+| 每天 09:00 | 检查任务逾期 | 逾期任务状态变更 → 钉钉告警 |
+| 每天 18:00 | 今日待办提醒 | 当日到期的任务 → 钉钉提醒 |
 
-    private final NovelChapterDao chapterDao;
-    private final NovelInfoDao novelDao;
-    private final CozeService cozeService;
-    private final NotificationService notificationService;
+### 12.4 完整接口清单
 
-    private static final int CHAPTER_WORD_TARGET = 3000; // 每章目标字数
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/crm/customer/page` | GET | 客户分页（名称/等级/状态/负责人筛选）|
+| `/crm/customer` | POST | 新增客户（自动手机号去重）|
+| `/crm/customer/{id}` | PUT | 修改客户 |
+| `/crm/customer/{id}` | DELETE | 删除客户 |
+| `/crm/customer/stats` | GET | 我的客户统计（各状态数量）|
+| `/crm/followup` | POST | 添加跟进记录（自动建待办）|
+| `/crm/followup/list` | GET | 客户跟进历史 |
+| `/crm/task` | POST | 创建待办任务 |
+| `/crm/task/{id}/complete` | POST | 完成任务 |
+| `/crm/task/pending` | GET | 我的待办列表 |
+| `/crm/task/page` | GET | 任务分页（状态/优先级筛选）|
 
-    @Override
-    public Long generateAndSaveDraft(Long novelId, Integer chapterNo) {
-        // 1. 查询小说信息
-        NovelInfo novel = novelDao.selectById(novelId);
-        if (novel == null) throw new BizException(40001, "小说不存在");
+详细代码见：[examples/crm-customer-scenario/](examples/crm-customer-scenario/)
 
-        // 2. 构造 Coze 工作流请求
-        CozeRequest request = CozeRequest.builder()
-                .workflowId("your-novel-workflow-id")  // Coze 工作流 ID
-                .variables(Map.of(
-                        "novel_title", novel.getTitle(),
-                        "chapter_no", chapterNo,
-                        "author", novel.getAuthor(),
-                        "word_target", CHAPTER_WORD_TARGET
-                ))
-                .build();
-
-        // 3. 调用 Coze AI 工作流生成内容（指数退避重试）
-        CozeWorkflowResponse response;
-        try {
-            response = RetryingUtil.withExponentialBackoff(
-                    () -> cozeService.triggerWorkflow(request),
-                    3,    // 最多3次
-                    2000  // 2秒基础间隔
-            );
-        } catch (Exception e) {
-            log.error("AI 生成章节失败 | novelId={} | chapterNo={}", novelId, chapterNo, e);
-            notificationService.sendAlert("AI 写小说失败",
-                    StrUtil.format("小说：{} 第{}章生成失败\n原因：{}", 
-                            novel.getTitle(), chapterNo, e.getMessage()));
-            throw new BizException(50001, "AI 生成失败: " + e.getMessage());
-        }
-
-        // 4. 解析工作流输出
-        if (!response.isCompleted()) {
-            throw new BizException(50001, "工作流未完成，状态：" + response.getStatus());
-        }
-
-        String content = response.getOutputText();
-        if (StrUtil.isBlank(content)) {
-            throw new BizException(50001, "AI 返回内容为空");
-        }
-
-        // 5. 提取章节标题（工作流返回格式：标题|正文）
-        String title;
-        String body;
-        if (content.contains("|")) {
-            String[] parts = content.split("\|", 2);
-            title = parts[0].trim();
-            body = parts[1].trim();
-        } else {
-            title = StrUtil.format("第{}章", chapterNo);
-            body = content;
-        }
-
-        // 6. 保存草稿
-        NovelChapter chapter = new NovelChapter();
-        chapter.setNovelId(novelId);
-        chapter.setChapterNo(chapterNo);
-        chapter.setTitle(title);
-        chapter.setContent(body);
-        chapter.setWordCount(StrUtil.trimAll(body).length());
-        chapter.setStatus(0);  // 草稿
-        chapter.setCozeRunId(response.getWorkflowRunId());
-        chapterDao.insert(chapter);
-
-        log.info("AI 生成章节草稿成功 | chapterId={} | chapterNo={} | 字数={}",
-                chapter.getId(), chapterNo, chapter.getWordCount());
-
-        return chapter.getId();
-    }
-
-    @Override
-    public void publishToFanqie(Long chapterId) {
-        NovelChapter chapter = chapterDao.selectById(chapterId);
-        if (chapter == null) throw new BizException(40001, "章节不存在");
-        if (chapter.getStatus() == 1) throw new BizException(40001, "章节已发布");
-
-        NovelInfo novel = novelDao.selectById(chapter.getNovelId());
-        if (novel == null) throw new BizException(40001, "小说不存在");
-
-        try {
-            // TODO: 调用番茄小说 API 发布章节
-            // publishChapter(novel.getFanqieBookId(), novel.getFanqieToken(), chapter);
-
-            // 模拟成功
-            chapter.setStatus(1);
-            chapter.setPublishedAt(new Date());
-            chapterDao.updateById(chapter);
-
-            // 更新小说最后章节号
-            novel.setLastChapterNo(chapter.getChapterNo());
-            novelDao.updateById(novel);
-
-            log.info("章节发布成功 | chapterId={} | novel={}", chapterId, novel.getTitle());
-
-        } catch (Exception e) {
-            chapter.setStatus(2);  // 失败
-            chapter.setErrorMsg(e.getMessage());
-            chapterDao.updateById(chapter);
-
-            // 发送告警通知
-            notificationService.sendAlert("章节发布失败",
-                    StrUtil.format("小说：{} 第{}章发布失败\n原因：{}",
-                            novel.getTitle(), chapter.getChapterNo(), e.getMessage()));
-
-            throw new BizException(50001, "发布失败: " + e.getMessage());
-        }
-    }
-
-    @Override
-    @Async                       // 异步执行，不阻塞主线程
-    public void batchPublishPending() {
-        // 查询所有待发布的草稿
-        List<NovelChapter> pending = chapterDao.selectList(
-                new LambdaQueryWrapper<NovelChapter>()
-                        .eq(NovelChapter::getStatus, 0)
-                        .orderByAsc(NovelChapter::getNovelId, NovelChapter::getChapterNo)
-                        .last("LIMIT 50")  // 每次最多50章
-        );
-
-        if (pending.isEmpty()) {
-            log.info("没有待发布的章节草稿");
-            return;
-        }
-
-        int success = 0, failed = 0;
-        for (NovelChapter chapter : pending) {
-            try {
-                publishToFanqie(chapter.getId());
-                success++;
-                Thread.sleep(1000);  // 每章间隔1秒，避免频率限制
-            } catch (Exception e) {
-                failed++;
-                log.warn("章节发布异常 | chapterId={}", chapter.getId(), e);
-            }
-        }
-
-        // 发送汇总通知
-        notificationService.sendDefault("小说发布任务完成",
-                StrUtil.format("成功：{} 章，失败：{} 章", success, failed));
-
-        log.info("批量发布完成 | 成功={} | 失败={}", success, failed);
-    }
-}
-```
-
-#### Step 4：NovelChapterController
-
-```java
-@Tag(name = "09. 小说管理", description = "AI 写作 + 番茄发布")
-@RestController
-@RequestMapping("/novel/chapter")
-@RequiredArgsConstructor
-public class NovelChapterController {
-
-    private final NovelChapterService chapterService;
-
-    @Operation(summary = "生成章节草稿",
-               description = "调用 Coze AI 工作流生成小说章节内容，存入草稿箱")
-    @PostMapping("/generate")
-    @Login
-    @LogOperation("生成章节草稿")
-    public Result<Long> generate(
-            @Parameter(description = "小说ID") @RequestParam Long novelId,
-            @Parameter(description = "章节号") @RequestParam Integer chapterNo) {
-        Long chapterId = chapterService.generateAndSaveDraft(novelId, chapterNo);
-        return Result.success(chapterId);
-    }
-
-    @Operation(summary = "发布章节到番茄小说",
-               description = "将草稿箱中的章节推送到番茄小说平台")
-    @PostMapping("/publish/{chapterId}")
-    @Login
-    @LogOperation("发布章节到番茄")
-    public Result<Void> publish(@PathVariable Long chapterId) {
-        chapterService.publishToFanqie(chapterId);
-        return Result.success("发布成功");
-    }
-
-    @Operation(summary = "批量发布待审章节",
-               description = "后台异步批量发布所有待发布的草稿章节")
-    @PostMapping("/publish/batch")
-    @Login
-    @LogOperation("批量发布章节")
-    public Result<Void> batchPublish() {
-        // 异步执行，立即返回
-        chapterService.batchPublishPending();
-        return Result.success("发布任务已启动，请在通知中查看结果");
-    }
-
-    @Operation(summary = "查询章节列表")
-    @GetMapping("/page")
-    @Login
-    public Result<PageResult<NovelChapter>> page(ChapterPageQuery query) {
-        return Result.success(PageResult.of(chapterService.page(query)));
-    }
-
-    @Operation(summary = "查看章节详情")
-    @GetMapping("/{id}")
-    @Login
-    public Result<NovelChapter> getById(@PathVariable Long id) {
-        NovelChapter chapter = chapterService.getById(id);
-        return Result.success(chapter);
-    }
-}
-```
-
-### 12.4 定时任务（每天自动执行）
-
-```java
-@Component
-@RequiredArgsConstructor
-public class NovelCronJob {
-
-    private final NovelChapterService chapterService;
-    private final NotificationService notificationService;
-
-    /**
-     * 每天 09:30 自动生成并发布新章节
-     * 配置：@Scheduled(cron = "0 30 9 * * ?")
-     */
-    @Scheduled(cron = "0 30 9 * * ?")
-    @Async
-    public void autoGenerateAndPublish() {
-        log.info("定时任务：AI 写小说开始");
-
-        try {
-            // 1. 查询需要更新的小说（假设 ID=1）
-            Long novelId = 1L;
-            NovelInfo novel = novelDao.selectById(novelId);
-            int nextChapter = novel.getLastChapterNo() + 1;
-
-            // 2. 生成新章节草稿
-            Long chapterId = chapterService.generateAndSaveDraft(novelId, nextChapter);
-
-            // 3. 自动发布到番茄
-            chapterService.publishToFanqie(chapterId);
-
-            // 4. 通知作者
-            notificationService.sendDefault("小说更新完成",
-                    StrUtil.format("《{}》第{}章已自动发布，字数约{}字",
-                            novel.getTitle(), nextChapter, 3000));
-
-        } catch (Exception e) {
-            log.error("AI 写小说定时任务失败", e);
-            notificationService.sendAlert("AI 写小说任务失败", e.getMessage());
-        }
-    }
-}
-```
-
-### 12.5 配置（application.yml）
-
-```yaml
-# Coze AI
-coze:
-  enabled: true
-  base-url: https://api.coze.cn
-  api-token: ${COZE_API_TOKEN:}
-  workflow-id: your-novel-workflow-id
-  poll-interval: 2
-  poll-timeout: 120   # AI 生成可能较慢，超时设长一点
-
-# 通知
-notification:
-  dingtalk:
-    enabled: true
-    webhook-url: ${DINGTALK_WEBHOOK_URL:}
-  serverchan:
-    enabled: true
-    sendkey: ${SERVERCHAN_SENDKEY:}
-```
-
-### 12.6 整体调用时序图
-
-```
-作者/定时任务
-     │
-     ▼
-NovelChapterController.generate()
-     │
-     ▼
-CozeService.triggerWorkflow()
-     │  ┌──────────────────────────┐
-     │  │  Coze AI 工作流          │
-     │  │  （小说大纲 → 正文生成）  │
-     │  └──────────────────────────┘
-     ▼
-NovelChapterDao.insert()   保存草稿到数据库
-     │
-     ▼
-通知Service.sendDefault()   通知：草稿已生成
-     │
-     ▼
-Controller 返回 chapterId
-```
-
----
 
 ## ⚙️ 常用环境变量
 
