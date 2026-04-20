@@ -839,68 +839,146 @@ CREATE TABLE crm_followup_task (
 
 ---
 
-## 13. 场景案例：可配置审批工作流引擎
+## 13. 场景案例：Coze 风格工作流引擎（可视化编排）
 
-> 前后端完整实现，拖拽式流程设计器 + 审批流引擎，支持条件分支、多级审批、历史记录。
+> 参考 [Coze 工作流模型](https://github.com/coze-dev/coze-studio) 实现，拖拽式流程设计器 + 图执行引擎，支持 **12 种节点类型**。
 
 ### 13.1 数据库设计
 
-详细 SQL 见：`sql/workflow_schema.sql`
+详细 SQL：`sql/workflow_schema.sql`
 
 | 表名 | 说明 |
 |------|------|
-| `wf_definition` | 工作流定义（名称/编码/节点配置JSON）|
-| `wf_instance` | 工作流实例（每次申请生成一条）|
-| `wf_task` | 审批任务（每个审批节点生成一条）|
-| `wf_task_history` | 审批历史（每个操作记录一条）|
+| `wf_definition` | 工作流定义（名称/编码/graphData JSON）|
+| `wf_instance` | 工作流实例（每次运行生成一条）|
+| `wf_instance_log` | 执行日志（每个节点运行记录一条）|
 
-### 13.2 节点类型
+### 13.2 支持的节点类型（共 12 种）
 
-| 类型 | 说明 | 配置 |
-|------|------|------|
-| `start` | 发起人（起点，自动）| — |
-| `approver` | 审批人节点 | assigneeType / assigneeExpr / sequence |
-| `condition` | 条件分支 | conditions[] / defaultNodeId |
-| `end` | 流程结束 | — |
+#### 基础节点
+| 类型 | 说明 | 核心配置 |
+|------|------|---------|
+| `start` | 开始节点 | 输入参数定义 |
+| `end` | 结束节点 | 返回输出 |
 
-### 13.3 审批人表达式
+#### AI / 代码节点
+| 类型 | 说明 | 核心配置 |
+|------|------|---------|
+| `llm` | 大模型节点 | model / prompt / systemPrompt |
+| `code` | 代码节点 | language / code（JavaScript）|
+
+#### 逻辑节点
+| 类型 | 说明 | 核心配置 |
+|------|------|---------|
+| `condition` | 条件分支 | branches[] / defaultBranch |
+| `variable` | 变量节点 | variableName / variableValue |
+| `loop` | 循环节点 | loopType(for/while) / loopTimes |
+
+#### 业务节点
+| 类型 | 说明 | 核心配置 |
+|------|------|---------|
+| `approval` | 人工审批 | assigneeType / assigneeExpr / titleTemplate |
+| `http` | HTTP 请求 | url / method / headers / body |
+| `message` | 消息通知 | channel(weixin/email/dingtalk等) / toUser / title / content |
+| `database` | 数据库 SQL | sql / isSelect |
+| `subflow` | 子流程调用 | subflowCode |
+
+### 13.3 节点数据结构（与前端 Vue Flow 一致）
+
+```json
+{
+  "nodes": [
+    {
+      "id": "node_start",
+      "type": "start",
+      "position": { "x": 200, "y": 50 },
+      "data": { "name": "开始" }
+    },
+    {
+      "id": "node_llm",
+      "type": "llm",
+      "position": { "x": 200, "y": 150 },
+      "data": {
+        "name": "AI 生成报告",
+        "model": "MiniMax-M*",
+        "prompt": "请为 {{ company }} 生成一份{{ type }}报告",
+        "systemPrompt": "你是一个专业的行业分析师"
+      }
+    },
+    {
+      "id": "node_cond",
+      "type": "condition",
+      "position": { "x": 200, "y": 280 },
+      "data": {
+        "name": "金额判断",
+        "branches": [
+          { "name": "高金额", "conditionExpr": "amount > 10000", "targetNodeId": "node_approval_2" }
+        ],
+        "defaultBranch": { "targetNodeId": "node_end" }
+      }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "source": "node_start", "target": "node_llm" },
+    { "id": "e2", "source": "node_llm", "target": "node_cond" }
+  ]
+}
+```
+
+### 13.4 引擎执行流程
 
 ```
-user:123           → 指定用户
-role:manager       → 指定角色
-${initiator}       → 发起人自己
+加载 WfGraph（nodes + edges）
+       ↓
+  找到 start 节点
+       ↓
+  NodeExecutor.execute()  ─→ WfNodeResult { status, outputData, nextNodeId }
+       ↓
+  查找下一节点（从 edges）
+       ↓
+  Condition 节点：evalCondition() 计算条件表达式，走对应分支
+       ↓
+  Approval 节点：创建任务 → 暂停 → 等待人工审批回调
+       ↓
+  End 节点：流程结束，记录 outputData
 ```
 
-### 13.4 API 接口
+### 13.5 核心类结构
 
-**管理端：**
 ```
-GET    /workflow/definition/page      分页查询
-POST   /workflow/definition            创建定义
-POST   /workflow/definition/{id}/publish  发布
+workflow/engine/
+├── WfGraph.java           图结构（Node/Edge/NodeData）
+├── WfNodeResult.java      节点执行结果
+├── ExecutionContext.java  执行上下文（变量/路由/审批回调）
+├── WorkflowEngine.java     图执行引擎（主循环）
+└── NodeExecutors.java     12种节点执行器（Start/End/LLM/Code/Condition/Approval/HTTP/Variable/Loop/Subflow/Message/Database）
+```
+
+### 13.6 API 接口
+
+```bash
+# 定义管理
+GET    /workflow/definition/page       分页查询
+POST   /workflow/definition             创建/更新
+GET    /workflow/definition/{id}        详情
+POST   /workflow/definition/{id}/publish 发布
 POST   /workflow/definition/{id}/disable 禁用
+DELETE /workflow/definition/{id}        删除
+
+# 执行
+POST   /workflow/trigger/{code}          触发工作流（同步）
+GET    /workflow/instance/{id}           实例详情
+GET    /workflow/instance/{id}/logs     执行日志
+GET    /workflow/instance/my            我的实例
+
+# 审批回调
+POST   /workflow/callback/approve        审批完成回调
 ```
 
-**用户端：**
-```
-POST   /workflow/submit                提交申请
-GET    /workflow/task/my               我的待办
-POST   /workflow/task/approve           审批（同意/拒绝）
-POST   /workflow/instance/revoke        撤回申请
-GET    /workflow/instance/my           我的申请
-GET    /workflow/instance/{id}/history 审批历史
-```
-
-### 13.5 前端页面
-
-| 页面 | 路径 | 功能 |
-|------|------|------|
-| 工作流设计器 | `/workflow/designer` | 拖拽式流程设计，节点配置 |
-| 我的审批 | `/workflow/my` | 待办列表 + 审批弹窗 + 申请记录 |
-
-详细代码见：
+详细代码：
 - 后端：`src/main/java/.../modules/workflow/`
 - 前端：`apps/web-ele/src/views/workflow/`
+
 
 ## ⚙️ 常用环境变量
 

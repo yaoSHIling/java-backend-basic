@@ -1,68 +1,105 @@
 package com.example.basic.modules.workflow.controller;
 
+import cn.hutool.json.JSONUtil;
 import com.example.basic.annotation.Login;
 import com.example.basic.annotation.LogOperation;
 import com.example.basic.common.result.PageResult;
 import com.example.basic.common.result.Result;
 import com.example.basic.model.query.PageParams;
-import com.example.basic.modules.notification.service.NotificationService;
-import com.example.basic.modules.user.entity.User;
-import com.example.basic.modules.workflow.entity.*;
-import com.example.basic.modules.workflow.impl.WorkflowServiceImpl;
-import com.example.basic.modules.workflow.model.*;
+import com.example.basic.modules.workflow.engine.WorkflowEngine;
+import com.example.basic.modules.workflow.engine.WfGraph;
+import com.example.basic.modules.workflow.entity.WfDefinition;
+import com.example.basic.modules.workflow.entity.WfInstance;
+import com.example.basic.modules.workflow.entity.WfInstanceLog;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.example.basic.modules.workflow.dao.WfDefinitionDao;
+import com.example.basic.modules.workflow.dao.WfInstanceDao;
+import com.example.basic.modules.workflow.dao.WfInstanceLogDao;
 import com.example.basic.util.JwtUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
+import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Date;
 import java.util.List;
+import java.util.Map;
 
 /**
- * 工作流接口。
+ * 工作流接口（参考 Coze 工作流 API）
  *
- * <p>分为两大部分：
+ * <p>提供：
  * <ul>
- *   <li>管理端：工作流定义 CRUD + 发布/禁用</li>
- *   <li>用户端：提交申请 / 我的待办 / 我的已办 / 审批操作</li>
+ *   <li>工作流定义管理（CRUD + 发布/禁用）</li>
+ *   <li>工作流执行（同步/异步触发）</li>
+ *   <li>执行结果查询</li>
+ *   <li>审批回调（/workflow/callback/approve）</li>
  * </ul>
  */
-@Tag(name = "11. 工作流引擎", description = "可配置审批流程引擎")
+@Tag(name = "12. 工作流引擎（Coze 风格）", description = "可视化流程编排 + 执行引擎")
 @RestController
 @RequestMapping("/workflow")
 @RequiredArgsConstructor
 public class WorkflowController {
 
-    private final WorkflowServiceImpl workflowService;
-    private final NotificationService notificationService;
+    private final WfDefinitionDao definitionDao;
+    private final WfInstanceDao instanceDao;
+    private final WfInstanceLogDao logDao;
+    private final WorkflowEngine workflowEngine;
 
-    // ==================== 管理端：定义管理 ====================
+    // ==================== 定义管理 ====================
 
     @Operation(summary = "工作流定义分页")
     @GetMapping("/definition/page")
     @Login
     public Result<PageResult<WfDefinition>> pageDefinitions(
-            @Parameter(description = "定义ID") WfDefinition query,
+            WfDefinition query,
             PageParams pageParams) {
-        return Result.success(PageResult.of(workflowService.pageDefinitions(query, pageParams)));
+        LambdaQueryWrapper<WfDefinition> w = new LambdaQueryWrapper<>();
+        if (query.getName() != null) w.like(WfDefinition::getName, query.getName());
+        if (query.getCode() != null) w.eq(WfDefinition::getCode, query.getCode());
+        if (query.getStatus() != null) w.eq(WfDefinition::getStatus, query.getStatus());
+        w.orderByDesc(WfDefinition::getCreatedTime);
+        return Result.success(PageResult.of(definitionDao.selectPage(pageParams.toPage(), w)));
     }
 
     @Operation(summary = "获取工作流定义详情")
     @GetMapping("/definition/{id}")
     @Login
     public Result<WfDefinition> getDefinition(@PathVariable Long id) {
-        return Result.success(workflowService.getDefinitionById(id));
+        WfDefinition def = definitionDao.selectById(id);
+        def.setGraphData(def.getGraphData()); // JSON 字段
+        return Result.success(def);
     }
 
     @Operation(summary = "创建/更新工作流定义")
     @PostMapping("/definition")
     @Login
-    @LogOperation("创建工作流")
-    public Result<Long> saveDefinition(@RequestBody WfDefinitionSaveDTO dto, HttpServletRequest request) {
+    @LogOperation("保存工作流")
+    public Result<Long> saveDefinition(@RequestBody SaveDefDTO dto, HttpServletRequest request) {
         Long userId = JwtUtil.getLoginUser(request).getUserId();
-        return Result.success(workflowService.saveDefinition(dto, userId));
+        WfDefinition def;
+        if (dto.getId() != null) {
+            def = definitionDao.selectById(dto.getId());
+        } else {
+            def = new WfDefinition();
+            def.setCreatedBy(userId);
+            def.setCreatedTime(new Date());
+            def.setVersion(1);
+            def.setStatus(WfDefinition.STATUS_DRAFT);
+        }
+        def.setName(dto.getName());
+        def.setCode(dto.getCode());
+        def.setDescription(dto.getDescription());
+        def.setGraphData(JSONUtil.toJson(dto.getGraphData()));
+        def.setVariables(dto.getVariables() != null ? JSONUtil.toJson(dto.getVariables()) : null);
+        def.setUpdatedTime(new Date());
+        definitionDao.insertOrUpdate(def);
+        return Result.success(def.getId());
     }
 
     @Operation(summary = "发布工作流")
@@ -70,7 +107,10 @@ public class WorkflowController {
     @Login
     @LogOperation("发布工作流")
     public Result<Void> publish(@PathVariable Long id) {
-        workflowService.publishDefinition(id);
+        WfDefinition def = definitionDao.selectById(id);
+        if (def == null) return Result.fail("工作流不存在");
+        def.setStatus(WfDefinition.STATUS_PUBLISHED);
+        definitionDao.updateById(def);
         return Result.success("发布成功");
     }
 
@@ -79,120 +119,110 @@ public class WorkflowController {
     @Login
     @LogOperation("禁用工作流")
     public Result<Void> disable(@PathVariable Long id) {
-        workflowService.disableDefinition(id);
+        WfDefinition def = definitionDao.selectById(id);
+        if (def == null) return Result.fail("工作流不存在");
+        def.setStatus(WfDefinition.STATUS_DISABLED);
+        definitionDao.updateById(def);
         return Result.success("禁用成功");
     }
 
-    // ==================== 用户端：流程操作 ====================
-
-    @Operation(summary = "提交工作流申请")
-    @PostMapping("/submit")
+    @Operation(summary = "删除工作流")
+    @DeleteMapping("/definition/{id}")
     @Login
-    @LogOperation("提交工作流申请")
-    public Result<Long> submit(@RequestBody WfSubmitDTO dto, HttpServletRequest request) {
-        Long userId = JwtUtil.getLoginUser(request).getUserId();
-        return Result.success(workflowService.submit(dto, userId));
+    @LogOperation("删除工作流")
+    public Result<Void> deleteDefinition(@PathVariable Long id) {
+        definitionDao.deleteById(id);
+        return Result.success("删除成功");
     }
 
-    @Operation(summary = "我的待审批任务列表")
-    @GetMapping("/task/my")
+    // ==================== 流程执行 ====================
+
+    @Operation(summary = "触发工作流（同步执行）")
+    @PostMapping "/trigger/{definitionCode}")
     @Login
-    public Result<PageResult<WfTask>> myTasks(PageParams pageParams, HttpServletRequest request) {
+    @LogOperation("触发工作流")
+    public Result<Long> trigger(
+            @PathVariable String definitionCode,
+            @RequestBody TriggerDTO dto,
+            HttpServletRequest request) {
         Long userId = JwtUtil.getLoginUser(request).getUserId();
-        return Result.success(PageResult.of(workflowService.pageMyTasks(userId, pageParams)));
+
+        WfDefinition def = definitionDao.selectOne(
+            new LambdaQueryWrapper<WfDefinition>()
+                .eq(WfDefinition::getCode, definitionCode)
+                .eq(WfDefinition::getStatus, WfDefinition.STATUS_PUBLISHED)
+        );
+        if (def == null) return Result.fail("工作流不存在或未发布");
+
+        WfGraph graph = JSONUtil.toJson(def.getGraphData(), WfGraph.class);
+        Long instanceId = workflowEngine.startSync(graph, dto.getData(), userId);
+        return Result.success(instanceId);
     }
 
-    @Operation(summary = "审批操作（同意/拒绝/转交）")
-    @PostMapping("/task/approve")
+    @Operation(summary = "查询执行实例")
+    @GetMapping("/instance/{id}")
     @Login
-    @LogOperation("审批操作")
-    public Result<Void> approve(@RequestBody WfApproveDTO dto, HttpServletRequest request) {
-        Long userId = JwtUtil.getLoginUser(request).getUserId();
-        workflowService.approve(dto, userId);
-        return Result.success("审批完成");
+    public Result<WfInstance> getInstance(@PathVariable Long id) {
+        return Result.success(instanceDao.selectById(id));
     }
 
-    @Operation(summary = "撤回申请")
-    @PostMapping("/instance/revoke")
+    @Operation(summary = "查询执行日志")
+    @GetMapping("/instance/{id}/logs")
     @Login
-    @LogOperation("撤回申请")
-    public Result<Void> revoke(@RequestBody WfRevokeDTO dto, HttpServletRequest request) {
-        Long userId = JwtUtil.getLoginUser(request).getUserId();
-        workflowService.revoke(dto, userId);
-        return Result.success("撤回成功");
+    public Result<List<WfInstanceLog>> getLogs(@PathVariable Long id) {
+        return Result.success(logDao.selectList(
+            new LambdaQueryWrapper<WfInstanceLog>()
+                .eq(WfInstanceLog::getInstanceId, id)
+                .orderByAsc(WfInstanceLog::getStartedAt)
+        ));
     }
 
-    @Operation(summary = "我的申请记录")
+    @Operation(summary = "我的执行实例")
     @GetMapping("/instance/my")
     @Login
     public Result<PageResult<WfInstance>> myInstances(
-            @Parameter(description = "实例ID") Long instanceId,
             @Parameter(description = "状态") Integer status,
             PageParams pageParams,
             HttpServletRequest request) {
         Long userId = JwtUtil.getLoginUser(request).getUserId();
-        WfInstanceQuery query = new WfInstanceQuery();
-        query.setInitiatorId(userId);
-        query.setStatus(status);
-        return Result.success(PageResult.of(workflowService.pageInstances(query, pageParams)));
+        LambdaQueryWrapper<WfInstance> w = new LambdaQueryWrapper<>();
+        w.eq(WfInstance::getInitiatorId, userId);
+        if (status != null) w.eq(WfInstance::getStatus, status);
+        w.orderByDesc(WfInstance::getStartedAt);
+        return Result.success(PageResult.of(instanceDao.selectPage(pageParams.toPage(), w)));
     }
 
-    @Operation(summary = "查看流程实例详情")
-    @GetMapping("/instance/{id}")
-    @Login
-    public Result<WfInstance> getInstance(@PathVariable Long id) {
-        return Result.success(workflowService.getInstanceById(id));
+    // ==================== 审批回调 ====================
+
+    @Operation(summary = "审批回调（审批人审批后触发）")
+    @PostMapping("/callback/approve")
+    public Result<Void> approveCallback(@RequestBody ApproveCallbackDTO dto) {
+        workflowEngine.resumeFromApproval(dto.getInstanceId(), dto.getTaskId(), dto.isApproved(), dto.getOpinion());
+        return Result.success("回调成功");
     }
 
-    @Operation(summary = "查看流程审批历史")
-    @GetMapping("/instance/{id}/history")
-    @Login
-    public Result<List<WfTaskHistory>> getHistory(@PathVariable Long id) {
-        return Result.success(workflowService.getInstanceHistory(id));
-    }
+    // ==================== DTO ====================
 
-    // ==================== 内部 DTO（放这里简化） ====================
-
-    @lombok.Data
-    public static class WfDefinitionSaveDTO {
+    @Data
+    public static class SaveDefDTO {
         private Long id;
         private String name;
         private String code;
         private String description;
-        private String formCode;
-        private WfDefinitionConfig config;
+        private WfGraph graphData;
+        private Map<String, Object> variables;
     }
 
-    @lombok.Data
-    public static class WfSubmitDTO {
-        private String definitionCode;
-        private String businessId;
-        private String businessType;
-        private String title;
-        private java.util.Map<String, Object> formData;
-        private Long assigneeId; // 审批人自选时传入
+    @Data
+    public static class TriggerDTO {
+        private Map<String, Object> data;
     }
 
-    @lombok.Data
-    public static class WfApproveDTO {
-        private Long taskId;
-        private String action;   // agree/reject/transfer
-        private String opinion;
-        private Long transferTo; // 转交目标
-
-        public boolean isAgree() { return "agree".equals(action); }
-    }
-
-    @lombok.Data
-    public static class WfRevokeDTO {
+    @Data
+    public static class ApproveCallbackDTO {
         private Long instanceId;
+        private Long taskId;
+        private boolean approved;
         private String opinion;
-    }
-
-    @lombok.Data
-    public static class WfInstanceQuery {
-        private Long initiatorId;
-        private Integer status;
-        private String definitionCode;
     }
 }
