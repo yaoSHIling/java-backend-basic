@@ -781,6 +781,14 @@ String content = RetryingUtil.withRetry(
 
 > 替换为更通用的企业级 CRM 系统，包含客户管理、销售跟进、待办任务、定时提醒、多渠道通知。
 
+#
+
+---
+
+## 12. 场景案例：CRM 客户跟进管理系统
+
+> 替换为更通用的企业级 CRM 系统，包含客户管理、销售跟进、待办任务、定时提醒、多渠道通知。
+
 ### 12.1 数据库设计
 
 ```sql
@@ -809,7 +817,7 @@ CREATE TABLE crm_followup (
     next_plan       VARCHAR(500)  COMMENT '下次跟进计划',
     next_followup_at DATETIME    COMMENT '下次跟进时间',
     created_by      BIGINT       NOT NULL,
-    created_time    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_time    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 跟进任务表
@@ -827,53 +835,72 @@ CREATE TABLE crm_followup_task (
 );
 ```
 
-### 12.2 核心流程
-
-**流程一：添加跟进记录**
-```
-POST /api/crm/followup
-→ CrmFollowupDao.insert()          保存跟进记录
-→ CrmCustomerDao.update()          更新最后跟进时间
-→ [有下次计划?] → CrmFollowupTaskDao.insert() 创建待办
-→ NotificationService.sendDefault() 钉钉通知
-→ 潜在客户自动升级为意向客户
-```
-
-**流程二：定时逾期提醒**
-```
-每天 09:00 触发
-→ 查询超过3天未跟进的客户
-→ 按负责人分组
-→ 钉钉/Server酱通知每个负责人
-→ 更新任务逾期状态
-```
-
-### 12.3 定时任务
-
-| 时间 | 任务 | 效果 |
-|------|------|------|
-| 每天 09:00 | 检查客户逾期 | 超过3天未跟进 → 钉钉通知销售 |
-| 每天 09:00 | 检查任务逾期 | 逾期任务状态变更 → 钉钉告警 |
-| 每天 18:00 | 今日待办提醒 | 当日到期的任务 → 钉钉提醒 |
-
-### 12.4 完整接口清单
-
-| 接口 | 方法 | 说明 |
-|------|------|------|
-| `/crm/customer/page` | GET | 客户分页（名称/等级/状态/负责人筛选）|
-| `/crm/customer` | POST | 新增客户（自动手机号去重）|
-| `/crm/customer/{id}` | PUT | 修改客户 |
-| `/crm/customer/{id}` | DELETE | 删除客户 |
-| `/crm/customer/stats` | GET | 我的客户统计（各状态数量）|
-| `/crm/followup` | POST | 添加跟进记录（自动建待办）|
-| `/crm/followup/list` | GET | 客户跟进历史 |
-| `/crm/task` | POST | 创建待办任务 |
-| `/crm/task/{id}/complete` | POST | 完成任务 |
-| `/crm/task/pending` | GET | 我的待办列表 |
-| `/crm/task/page` | GET | 任务分页（状态/优先级筛选）|
-
 详细代码见：[examples/crm-customer-scenario/](examples/crm-customer-scenario/)
 
+---
+
+## 13. 场景案例：可配置审批工作流引擎
+
+> 前后端完整实现，拖拽式流程设计器 + 审批流引擎，支持条件分支、多级审批、历史记录。
+
+### 13.1 数据库设计
+
+详细 SQL 见：`sql/workflow_schema.sql`
+
+| 表名 | 说明 |
+|------|------|
+| `wf_definition` | 工作流定义（名称/编码/节点配置JSON）|
+| `wf_instance` | 工作流实例（每次申请生成一条）|
+| `wf_task` | 审批任务（每个审批节点生成一条）|
+| `wf_task_history` | 审批历史（每个操作记录一条）|
+
+### 13.2 节点类型
+
+| 类型 | 说明 | 配置 |
+|------|------|------|
+| `start` | 发起人（起点，自动）| — |
+| `approver` | 审批人节点 | assigneeType / assigneeExpr / sequence |
+| `condition` | 条件分支 | conditions[] / defaultNodeId |
+| `end` | 流程结束 | — |
+
+### 13.3 审批人表达式
+
+```
+user:123           → 指定用户
+role:manager       → 指定角色
+${initiator}       → 发起人自己
+```
+
+### 13.4 API 接口
+
+**管理端：**
+```
+GET    /workflow/definition/page      分页查询
+POST   /workflow/definition            创建定义
+POST   /workflow/definition/{id}/publish  发布
+POST   /workflow/definition/{id}/disable 禁用
+```
+
+**用户端：**
+```
+POST   /workflow/submit                提交申请
+GET    /workflow/task/my               我的待办
+POST   /workflow/task/approve           审批（同意/拒绝）
+POST   /workflow/instance/revoke        撤回申请
+GET    /workflow/instance/my           我的申请
+GET    /workflow/instance/{id}/history 审批历史
+```
+
+### 13.5 前端页面
+
+| 页面 | 路径 | 功能 |
+|------|------|------|
+| 工作流设计器 | `/workflow/designer` | 拖拽式流程设计，节点配置 |
+| 我的审批 | `/workflow/my` | 待办列表 + 审批弹窗 + 申请记录 |
+
+详细代码见：
+- 后端：`src/main/java/.../modules/workflow/`
+- 前端：`apps/web-ele/src/views/workflow/`
 
 ## ⚙️ 常用环境变量
 
