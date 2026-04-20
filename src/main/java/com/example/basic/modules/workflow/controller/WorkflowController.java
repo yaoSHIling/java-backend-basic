@@ -11,11 +11,13 @@ import com.example.basic.modules.workflow.engine.WfGraph;
 import com.example.basic.modules.workflow.entity.WfDefinition;
 import com.example.basic.modules.workflow.entity.WfInstance;
 import com.example.basic.modules.workflow.entity.WfInstanceLog;
+import com.example.basic.modules.workflow.entity.WfTask;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 
 import com.example.basic.modules.workflow.dao.WfDefinitionDao;
 import com.example.basic.modules.workflow.dao.WfInstanceDao;
 import com.example.basic.modules.workflow.dao.WfInstanceLogDao;
+import com.example.basic.modules.workflow.dao.WfTaskDao;
 import com.example.basic.util.JwtUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -28,6 +30,7 @@ import org.springframework.web.bind.annotation.*;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 工作流接口（参考 Coze 工作流 API）
@@ -49,6 +52,7 @@ public class WorkflowController {
     private final WfDefinitionDao definitionDao;
     private final WfInstanceDao instanceDao;
     private final WfInstanceLogDao logDao;
+    private final WfTaskDao taskDao;
     private final WorkflowEngine workflowEngine;
 
     // ==================== 定义管理 ====================
@@ -198,12 +202,61 @@ public class WorkflowController {
         return Result.success(PageResult.of(instanceDao.selectPage(pageParams.toPage(), w)));
     }
 
+    @Operation(summary = "查询实例下的审批任务")
+    @GetMapping("/task/instance/{instanceId}")
+    @Login
+    public Result<List<WfTask>> listTasksByInstance(@PathVariable Long instanceId, HttpServletRequest request) {
+        Long userId = JwtUtil.getLoginUser(request).getUserId();
+        WfInstance instance = instanceDao.selectById(instanceId);
+        if (instance == null) return Result.fail(404, "实例不存在");
+        boolean canView = Objects.equals(instance.getInitiatorId(), userId)
+            || taskDao.selectCount(new LambdaQueryWrapper<WfTask>()
+                .eq(WfTask::getInstanceId, instanceId)
+                .eq(WfTask::getAssigneeId, userId)) > 0;
+        if (!canView) return Result.fail(403, "无权查看该实例审批任务");
+        return Result.success(taskDao.selectList(
+            new LambdaQueryWrapper<WfTask>()
+                .eq(WfTask::getInstanceId, instanceId)
+                .orderByAsc(WfTask::getCreatedTime)
+        ));
+    }
+
+    @Operation(summary = "我的待审批任务")
+    @GetMapping("/task/my")
+    @Login
+    public Result<PageResult<WfTask>> myTasks(
+            @Parameter(description = "状态") Integer status,
+            PageParams pageParams,
+            HttpServletRequest request) {
+        Long userId = JwtUtil.getLoginUser(request).getUserId();
+        LambdaQueryWrapper<WfTask> w = new LambdaQueryWrapper<>();
+        w.eq(WfTask::getAssigneeId, userId);
+        if (status != null) w.eq(WfTask::getStatus, status);
+        w.orderByDesc(WfTask::getCreatedTime);
+        return Result.success(PageResult.of(taskDao.selectPage(pageParams.toPage(), w)));
+    }
+
     // ==================== 审批回调 ====================
 
     @Operation(summary = "审批回调（审批人审批后触发）")
     @PostMapping("/callback/approve")
-    public Result<Void> approveCallback(@RequestBody ApproveCallbackDTO dto) {
-        workflowEngine.resumeFromApproval(dto.getInstanceId(), dto.getTaskId(), dto.isApproved(), dto.getOpinion());
+    @Login
+    public Result<Void> approveCallback(@RequestBody ApproveCallbackDTO dto, HttpServletRequest request) {
+        Long loginUserId = JwtUtil.getLoginUser(request).getUserId();
+        Long operatorId = dto.getOperatorId() != null ? dto.getOperatorId() : loginUserId;
+        WfTask task = taskDao.selectById(dto.getTaskId());
+        if (task == null) return Result.fail(404, "审批任务不存在");
+        if (task.getAssigneeId() != null && !Objects.equals(task.getAssigneeId(), operatorId)) {
+            return Result.fail(403, "当前用户无权审批该任务");
+        }
+        workflowEngine.resumeFromApproval(
+            dto.getInstanceId(),
+            dto.getTaskId(),
+            dto.isApproved(),
+            dto.getOpinion(),
+            operatorId,
+            dto.getOperatorName()
+        );
         return Result.success(null, "回调成功");
     }
 
@@ -230,5 +283,7 @@ public class WorkflowController {
         private Long taskId;
         private boolean approved;
         private String opinion;
+        private Long operatorId;
+        private String operatorName;
     }
 }

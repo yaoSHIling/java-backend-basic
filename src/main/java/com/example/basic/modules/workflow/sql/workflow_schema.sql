@@ -59,3 +59,29 @@ CREATE TABLE wf_instance_log (
     KEY idx_instance (instance_id),
     KEY idx_node (node_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='工作流执行日志表';
+
+-- 审批任务表
+CREATE TABLE wf_task (
+    id              BIGINT PRIMARY KEY AUTO_INCREMENT,
+    instance_id     BIGINT        NOT NULL COMMENT '工作流实例ID',
+    definition_id   BIGINT        COMMENT '工作流定义ID',
+    definition_code VARCHAR(100)  COMMENT '工作流编码',
+    node_id         VARCHAR(100)  NOT NULL COMMENT '节点ID',
+    node_name       VARCHAR(200)  NOT NULL COMMENT '节点名称',
+    assignee_type   TINYINT       NOT NULL DEFAULT 1 COMMENT '审批人类型：1=指定人 2=角色 3=发起人自选',
+    assignee_expr   VARCHAR(500)  COMMENT '审批人表达式',
+    assignee_id     BIGINT        COMMENT '审批人ID（能解析时写入）',
+    assignee_name   VARCHAR(100)  COMMENT '审批人名称（回显用）',
+    title           VARCHAR(300)  COMMENT '审批标题',
+    content         TEXT          COMMENT '审批内容',
+    status          TINYINT       NOT NULL DEFAULT 0 COMMENT '0=待审批 1=已通过 2=已转交 3=已驳回',
+    opinion         VARCHAR(1000) COMMENT '审批意见',
+    action          VARCHAR(20)   COMMENT 'approve/reject/transfer',
+    operator_id     BIGINT        COMMENT '实际操作人',
+    operator_name   VARCHAR(100)  COMMENT '实际操作人名称',
+    operated_at     DATETIME      COMMENT '审批处理时间',
+    created_time    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_instance (instance_id),
+    KEY idx_assignee (assignee_id),
+    KEY idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='审批任务表';

@@ -855,6 +855,7 @@ CREATE TABLE crm_followup_task (
 | `wf_definition` | 工作流定义（名称/编码/graphData JSON）|
 | `wf_instance` | 工作流实例（每次运行生成一条）|
 | `wf_instance_log` | 节点执行日志（耗时/输入/输出/错误）|
+| `wf_task` | 审批任务表（审批节点落库、审批状态闭环）|
 
 ---
 
@@ -1053,6 +1054,8 @@ POST   /workflow/trigger/{code}          触发工作流（同步）
 GET    /workflow/instance/{id}           实例详情
 GET    /workflow/instance/{id}/logs     执行日志（按时间线排列）
 GET    /workflow/instance/my            我的实例
+GET    /workflow/task/instance/{id}     实例审批任务
+GET    /workflow/task/my                我的待审批任务
 
 # 审批回调（审批人审批后，由前端调用此接口继续流程）
 POST   /workflow/callback/approve        审批完成回调

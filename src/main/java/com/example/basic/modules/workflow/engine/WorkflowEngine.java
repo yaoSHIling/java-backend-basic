@@ -3,16 +3,19 @@ package com.example.basic.modules.workflow.engine;
 import cn.hutool.json.JSONUtil;
 import com.example.basic.modules.workflow.dao.WfInstanceDao;
 import com.example.basic.modules.workflow.dao.WfInstanceLogDao;
+import com.example.basic.modules.workflow.dao.WfTaskDao;
 import com.example.basic.modules.workflow.engine.WfGraph.*;
 import com.example.basic.modules.workflow.engine.WfNodeResult;
 import com.example.basic.modules.workflow.entity.WfInstance;
 import com.example.basic.modules.workflow.entity.WfInstanceLog;
+import com.example.basic.modules.workflow.entity.WfTask;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 
 /**
  * 工作流执行引擎（参考 Coze 图执行模型）
@@ -40,15 +43,18 @@ public class WorkflowEngine {
     private final Map<String, NodeExecutor> executorMap = new HashMap<>();
     private final WfInstanceDao instanceDao;
     private final WfInstanceLogDao logDao;
+    private final WfTaskDao taskDao;
 
     // 注入所有节点执行器
     public WorkflowEngine(
             WfInstanceDao instanceDao,
             WfInstanceLogDao logDao,
+            WfTaskDao taskDao,
             List<NodeExecutor> executors
     ) {
         this.instanceDao = instanceDao;
         this.logDao = logDao;
+        this.taskDao = taskDao;
         for (NodeExecutor e : executors) {
             executorMap.put(e.nodeType(), e);
             log.info("注册节点执行器: type={}", e.nodeType());
@@ -90,24 +96,28 @@ public class WorkflowEngine {
         ctx.setVariables(inputData != null ? new HashMap<>(inputData) : new HashMap<>());
 
         // 3. 注入审批任务创建回调
-        ctx.setApprovalTaskCallback((nodeId, nodeName, assigneeType, assigneeExpr, title, content) -> {
-            // TODO: 创建审批任务 WfTask，入库，返回 taskId
-            return 0L;
-        });
+        installApprovalTaskCallback(ctx, instance);
 
         // 4. 执行
+        boolean needFinalize = true;
         try {
             executeGraph(instance, graph, ctx, inputData);
-            instance.setStatus(WfInstance.STATUS_SUCCESS);
-            instance.setOutputData(JSONUtil.toJsonStr(ctx.getFinalOutput()));
+            if (Objects.equals(instance.getStatus(), WfInstance.STATUS_PAUSED)) {
+                needFinalize = false;
+            } else {
+                instance.setStatus(WfInstance.STATUS_SUCCESS);
+                instance.setOutputData(JSONUtil.toJsonStr(ctx.getFinalOutput()));
+            }
         } catch (Exception e) {
             instance.setStatus(WfInstance.STATUS_FAILED);
             instance.setErrorMsg(e.getMessage());
             log.error("工作流执行失败 | instanceId={}", instance.getId(), e);
         }
 
-        instance.setFinishedAt(new Date());
-        instanceDao.updateById(instance);
+        if (needFinalize) {
+            instance.setFinishedAt(new Date());
+            instanceDao.updateById(instance);
+        }
         return instance.getId();
     }
 
@@ -146,6 +156,7 @@ public class WorkflowEngine {
                                  Map<String, Object> inputData, String startNodeId) throws Exception {
         String currentNodeId = startNodeId;
         Map<String, Object> currentData = inputData != null ? new HashMap<>(inputData) : new HashMap<>();
+        ctx.setVariables(new HashMap<>(currentData));
 
         // 主循环：最多 1000 个节点，防止死循环
         int loopCount = 0;
@@ -205,6 +216,7 @@ public class WorkflowEngine {
             // 更新当前数据
             if (result.getOutputData() != null) {
                 currentData.putAll(result.getOutputData());
+                ctx.getVariables().putAll(result.getOutputData());
             }
 
             // 特殊处理：end 节点
@@ -246,9 +258,21 @@ public class WorkflowEngine {
      * 审批回调：审批通过/拒绝后，驱动流程继续执行
      */
     @Transactional
-    public void resumeFromApproval(Long instanceId, Long taskId, boolean approved, String opinion) {
+    public void resumeFromApproval(Long instanceId, Long taskId, boolean approved, String opinion,
+                                   Long operatorId, String operatorName) {
         WfInstance instance = instanceDao.selectById(instanceId);
         if (instance == null) throw new IllegalArgumentException("实例不存在: " + instanceId);
+
+        WfTask task = taskDao.selectById(taskId);
+        if (task == null) {
+            throw new IllegalArgumentException("审批任务不存在: " + taskId);
+        }
+        if (!Objects.equals(task.getInstanceId(), instanceId)) {
+            throw new IllegalArgumentException("审批任务不属于当前实例");
+        }
+        if (!Objects.equals(task.getStatus(), WfTask.STATUS_PENDING)) {
+            throw new IllegalStateException("审批任务已处理，请勿重复提交");
+        }
 
         WfGraph graph = JSONUtil.toBean(instance.getGraphData(), WfGraph.class);
         ExecutionContext ctx = new ExecutionContext();
@@ -256,15 +280,16 @@ public class WorkflowEngine {
         ctx.setInstanceId(instanceId);
         ctx.setInitiatorId(instance.getInitiatorId());
         ctx.setVariables(new HashMap<>());
+        installApprovalTaskCallback(ctx, instance);
 
-        String pausedNodeId = instance.getCurrentNodeId();
+        String pausedNodeId = task.getNodeId() != null ? task.getNodeId() : instance.getCurrentNodeId();
         if (pausedNodeId == null || pausedNodeId.isBlank()) {
             throw new IllegalStateException("当前实例不在审批暂停状态");
         }
 
         Map<String, Object> currentData = parseJsonMap(instance.getInputData());
         WfInstanceLog pausedLog = logDao.selectOne(
-            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<WfInstanceLog>()
+            new LambdaQueryWrapper<WfInstanceLog>()
                 .eq(WfInstanceLog::getInstanceId, instanceId)
                 .eq(WfInstanceLog::getNodeId, pausedNodeId)
                 .orderByDesc(WfInstanceLog::getId)
@@ -278,6 +303,18 @@ public class WorkflowEngine {
         currentData.put("_approvalStatus", approved ? "approved" : "rejected");
         currentData.put("_approvalApproved", approved);
         currentData.put("_approvalOpinion", opinion);
+        currentData.put("_approvalOperatorId", operatorId != null ? operatorId : task.getAssigneeId());
+        currentData.put("_approvalOperatorName", operatorName != null && !operatorName.isBlank() ? operatorName : task.getAssigneeName());
+        currentData.put("_approvalNodeId", pausedNodeId);
+        currentData.put("_approvalAt", new Date());
+
+        task.setStatus(approved ? WfTask.STATUS_APPROVED : WfTask.STATUS_REJECTED);
+        task.setAction(approved ? WfTask.ACTION_APPROVE : WfTask.ACTION_REJECT);
+        task.setOpinion(opinion);
+        task.setOperatorId(operatorId != null ? operatorId : task.getAssigneeId());
+        task.setOperatorName(operatorName != null && !operatorName.isBlank() ? operatorName : task.getAssigneeName());
+        task.setOperatedAt(new Date());
+        taskDao.updateById(task);
 
         String nextNodeId = resolveApprovalNextNode(graph, pausedNodeId, approved);
         if (nextNodeId == null) {
@@ -301,6 +338,70 @@ public class WorkflowEngine {
             instanceDao.updateById(instance);
             throw new RuntimeException("审批后恢复流程失败: " + e.getMessage(), e);
         }
+    }
+
+
+    private void installApprovalTaskCallback(ExecutionContext ctx, WfInstance instance) {
+        ctx.setApprovalTaskCallback((nodeId, nodeName, assigneeType, assigneeExpr, title, content) -> {
+            WfTask task = new WfTask();
+            task.setInstanceId(instance.getId());
+            task.setDefinitionId(instance.getDefinitionId());
+            task.setDefinitionCode(instance.getDefinitionCode());
+            task.setNodeId(nodeId);
+            task.setNodeName(nodeName);
+            task.setAssigneeType(assigneeType);
+            task.setAssigneeExpr(assigneeExpr);
+            task.setAssigneeId(resolveAssigneeId(assigneeType, assigneeExpr, instance.getInitiatorId()));
+            task.setAssigneeName(resolveAssigneeName(assigneeExpr, task.getAssigneeId(), instance.getInitiatorId()));
+            task.setTitle(title);
+            task.setContent(content);
+            task.setStatus(WfTask.STATUS_PENDING);
+            task.setCreatedTime(new Date());
+            taskDao.insert(task);
+            return task.getId();
+        });
+    }
+
+    private Long resolveAssigneeId(Integer assigneeType, String assigneeExpr, Long initiatorId) {
+        if (Objects.equals(assigneeType, 3)) {
+            return initiatorId;
+        }
+        if (assigneeExpr == null || assigneeExpr.isBlank()) {
+            return null;
+        }
+        String normalized = assigneeExpr.trim();
+        if ("${initiator}".equalsIgnoreCase(normalized)) {
+            return initiatorId;
+        }
+        if (normalized.startsWith("user:")) {
+            try {
+                return Long.parseLong(normalized.substring("user:".length()).trim());
+            } catch (NumberFormatException ignore) {
+                return null;
+            }
+        }
+        try {
+            return Long.parseLong(normalized);
+        } catch (NumberFormatException ignore) {
+            return null;
+        }
+    }
+
+    private String resolveAssigneeName(String assigneeExpr, Long assigneeId, Long initiatorId) {
+        if (assigneeExpr == null || assigneeExpr.isBlank()) {
+            return assigneeId != null ? "用户" + assigneeId : null;
+        }
+        String normalized = assigneeExpr.trim();
+        if ("${initiator}".equalsIgnoreCase(normalized) || Objects.equals(assigneeId, initiatorId)) {
+            return "发起人";
+        }
+        if (normalized.startsWith("user:")) {
+            return "用户" + normalized.substring("user:".length()).trim();
+        }
+        if (normalized.startsWith("role:")) {
+            return "角色:" + normalized.substring("role:".length()).trim();
+        }
+        return normalized;
     }
 
     private String resolveApprovalNextNode(WfGraph graph, String pausedNodeId, boolean approved) {
