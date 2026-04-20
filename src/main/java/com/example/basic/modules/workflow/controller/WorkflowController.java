@@ -226,12 +226,19 @@ public class WorkflowController {
     @Login
     public Result<PageResult<WfTask>> myTasks(
             @Parameter(description = "状态") Integer status,
+            @Parameter(description = "关键字") String keyword,
             PageParams pageParams,
             HttpServletRequest request) {
         Long userId = JwtUtil.getLoginUser(request).getUserId();
         LambdaQueryWrapper<WfTask> w = new LambdaQueryWrapper<>();
         w.eq(WfTask::getAssigneeId, userId);
         if (status != null) w.eq(WfTask::getStatus, status);
+        if (keyword != null && !keyword.isBlank()) {
+            w.and(q -> q.like(WfTask::getTitle, keyword)
+                .or().like(WfTask::getNodeName, keyword)
+                .or().like(WfTask::getDefinitionCode, keyword)
+                .or().like(WfTask::getAssigneeName, keyword));
+        }
         w.orderByDesc(WfTask::getCreatedTime);
         return Result.success(PageResult.of(taskDao.selectPage(pageParams.toPage(), w)));
     }
@@ -243,10 +250,10 @@ public class WorkflowController {
     @Login
     public Result<Void> approveCallback(@RequestBody ApproveCallbackDTO dto, HttpServletRequest request) {
         Long loginUserId = JwtUtil.getLoginUser(request).getUserId();
-        Long operatorId = dto.getOperatorId() != null ? dto.getOperatorId() : loginUserId;
+        Long operatorId = loginUserId;
         WfTask task = taskDao.selectById(dto.getTaskId());
         if (task == null) return Result.fail(404, "审批任务不存在");
-        if (task.getAssigneeId() != null && !Objects.equals(task.getAssigneeId(), operatorId)) {
+        if (task.getAssigneeId() != null && !Objects.equals(task.getAssigneeId(), loginUserId)) {
             return Result.fail(403, "当前用户无权审批该任务");
         }
         workflowEngine.resumeFromApproval(

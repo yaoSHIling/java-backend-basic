@@ -1,5 +1,6 @@
 package com.example.basic.model.query;
 
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import io.swagger.v3.oas.annotations.Parameter;
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -32,5 +33,9 @@ public class PageParams {
 
     public PageParams(Long pageNum) {
         this.pageNum = pageNum;
+    }
+
+    public <T> Page<T> toPage() {
+        return new Page<>(pageNum, pageSize);
     }
 }
