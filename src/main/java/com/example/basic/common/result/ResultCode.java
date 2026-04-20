@@ -11,7 +11,7 @@ package com.example.basic.common.result;
 public enum ResultCode {
 
     /* ----------- 成功 ----------- */
-    SUCCESS(200, "操作成功"),
+    SUCCESS(0, "操作成功"),
 
     /* ----------- 通用错误（4xx） ----------- */
     BAD_REQUEST(400, "请求参数错误"),

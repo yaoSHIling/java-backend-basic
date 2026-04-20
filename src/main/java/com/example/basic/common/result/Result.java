@@ -14,14 +14,14 @@ import lombok.NoArgsConstructor;
  * <p>格式示例：
  * <pre>
  * {
- *   "code": 200,
+ *   "code": 0,
  *   "message": "操作成功",
  *   "data": { ... },
  *   "timestamp": 1713001234567
  * }
  * </pre>
  *
- * <p>前端只需判断 code === 200，即成功；否则取 message 展示错误。
+ * <p>前端只需判断 code === 0，即成功；否则取 message 展示错误。
  *
  * @param <T> data 字段的数据类型
  * @author hermes-agent
